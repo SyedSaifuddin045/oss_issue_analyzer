@@ -7,6 +7,7 @@ from src.indexer.parser import (
 )
 
 from src.indexer.languages import JavaScriptParser, PythonParser, TypeScriptParser
+from src.indexer.embedder import Embedder, LocalNomicEmbedder, MiniLMEmbedder, get_embedder
 
 __all__ = [
     "UnitType",
@@ -18,4 +19,8 @@ __all__ = [
     "TypeScriptParser",
     "get_parser",
     "get_parser_for_file",
+    "Embedder",
+    "LocalNomicEmbedder",
+    "MiniLMEmbedder",
+    "get_embedder",
 ]
