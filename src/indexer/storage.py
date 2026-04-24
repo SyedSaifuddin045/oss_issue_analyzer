@@ -83,7 +83,7 @@ class Repository(LanceModel):
 
 
 class VectorStore:
-    def __init__(self, db_path: str = "./.data/index.lance", vector_size: int = 768):
+    def __init__(self, db_path: str = ".oss-index/index.lance", vector_size: int = 768):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = lancedb.connect(str(self.db_path))

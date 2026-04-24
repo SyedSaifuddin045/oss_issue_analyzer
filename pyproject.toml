@@ -35,8 +35,6 @@ dev = [
 
 [project.scripts]
 oss-issue-analyzer = "src.__main__:app"
-start = "src.__main__:app"
-dev = "src.__main__:app"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

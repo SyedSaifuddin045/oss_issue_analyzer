@@ -59,15 +59,16 @@ def start(ctx: typer.Context):
 
 @app.command()
 def analyze(
-    issue_ref: Annotated[str, typer.Argument(help="Issue URL, number, or path to local markdown file")],
-    repo_path: Annotated[str, typer.Option("--repo", "-r", help="Path to the local indexed repository")] = ".",
-    db_path: Annotated[str, typer.Option("--db-path", help="Path to the index database")] = ".data/index.lance",
+    issue_ref: Annotated[str, typer.Argument(help="Issue URL, issue number, or path to local markdown file")],
+    repo_path: Annotated[Optional[str], typer.Option("--repo", "-r", help="Path to indexed repository (default: current dir)")] = None,
+    db_path: Annotated[Optional[str], typer.Option("--db-path", help="Path to index database (auto-detect if omitted)")] = None,
     embedder: Annotated[str, typer.Option("--embedder", help="Embedding model (nomic, minilm)")] = "minilm",
     limit: Annotated[int, typer.Option("--limit", "-l", help="Number of code units to retrieve")] = 10,
-    repo_flag: Annotated[Optional[str], typer.Option("--gh-repo", help="GitHub repo in owner/repo format for plain issue numbers")] = None,
+    gh_repo: Annotated[Optional[str], typer.Option("--gh-repo", help="GitHub repo (owner/repo) - auto-detected if not provided)")] = None,
 ):
     from pathlib import Path
     import hashlib
+    import subprocess
     
     from src.github.client import GitHubClient, load_issue_from_file
     from src.analyzer.preprocessor import IssuePreprocessor
@@ -76,15 +77,43 @@ def analyze(
     from src.indexer.storage import VectorStore
     from rich.panel import Panel
     
+    def get_github_remote(repo_dir: Path) -> tuple[str, str]:
+        try:
+            result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            url = result.stdout.strip()
+            if "github.com" in url:
+                if url.startswith("git@github.com:"):
+                    parts = url.replace("git@github.com:", "").replace(".git", "").split("/")
+                else:
+                    parts = url.replace("https://github.com/", "").replace(".git", "").split("/")
+                if len(parts) >= 2:
+                    return parts[0], parts[1]
+        except Exception:
+            pass
+        return None, None
+    
     try:
-        repo_dir = Path(repo_path).resolve()
+        if repo_path:
+            repo_dir = Path(repo_path).resolve()
+        else:
+            repo_dir = Path(".").resolve()
+        
         if not repo_dir.exists():
             console.print(f"[bold red]Error:[/bold red] Repository path does not exist: {repo_dir}")
             raise typer.Exit(1)
         if not repo_dir.is_dir():
             console.print(f"[bold red]Error:[/bold red] Repository path must be a directory: {repo_dir}")
             raise typer.Exit(1)
-
+        
+        if db_path is None:
+            db_path = str(repo_dir / ".oss-index" / "index.lance")
+        
         repo_id = hashlib.sha256(str(repo_dir).encode()).hexdigest()[:16]
         
         vector_store = VectorStore(db_path)
@@ -96,10 +125,22 @@ def analyze(
         if Path(issue_ref).exists():
             issue = load_issue_from_file(issue_ref)
         else:
+            owner, repo = gh_repo, None
+            if not owner:
+                owner, repo = get_github_remote(repo_dir)
+            
             client = GitHubClient(token=global_options.api_key)
             try:
-                owner, repo, number = client.parse_issue_ref(issue_ref, repo_hint=repo_flag)
-                issue = client.get_issue(owner, repo, number)
+                if not owner or not repo:
+                    console.print("[bold red]Error:[/bold red] Cannot determine GitHub repo. Use --gh-repo flag or run in a git repo with remote origin.")
+                    raise typer.Exit(1)
+                
+                issue_num = int(issue_ref) if issue_ref.isdigit() else None
+                if not issue_num:
+                    parsed_owner, parsed_repo, parsed_num = client.parse_issue_ref(issue_ref)
+                    issue = client.get_issue(parsed_owner, parsed_repo, parsed_num)
+                else:
+                    issue = client.get_issue(owner, repo, issue_num)
             except ValueError as exc:
                 console.print(f"[bold red]Error:[/bold red] {exc}")
                 raise typer.Exit(1)
@@ -187,7 +228,7 @@ def analyze(
 @app.command()
 def index(
     repo_path: Annotated[str, typer.Argument(help="Path to the repository")],
-    db_path: Annotated[str, typer.Option("--db-path", help="Path to the index database")] = ".data/index.lance",
+    db_path: Annotated[Optional[str], typer.Option("--db-path", help="Path to index database (default: <repo_path>/.oss-index)")] = None,
     embedder: Annotated[str, typer.Option("--embedder", help="Embedding model (nomic, minilm)")] = "minilm",
     force: Annotated[bool, typer.Option("--force", help="Force re-index from scratch")] = False,
 ):
@@ -195,11 +236,15 @@ def index(
     import hashlib
     from pathlib import Path
     
+    repo_dir = Path(repo_path).resolve()
+    if db_path is None:
+        db_path = str(repo_dir / ".oss-index" / "index.lance")
+    
     if force:
         console.print("[yellow]Force re-index enabled, clearing existing data...[/yellow]")
         from src.indexer.storage import get_index as get_storage_index
         idx = get_storage_index(db_path)
-        repo_id = hashlib.sha256(str(Path(repo_path).resolve()).encode()).hexdigest()[:16]
+        repo_id = hashlib.sha256(str(repo_dir).encode()).hexdigest()[:16]
         idx.delete_by_repo(repo_id)
     
     config = IndexerConfig(

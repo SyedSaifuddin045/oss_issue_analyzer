@@ -218,4 +218,4 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Local data (indexed code embeddings)
-.data/
+.oss-index/
