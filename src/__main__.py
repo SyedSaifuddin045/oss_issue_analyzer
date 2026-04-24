@@ -68,8 +68,46 @@ def analyze(
 @app.command()
 def index(
     repo_path: Annotated[str, typer.Argument(help="Path to the repository")],
+    db_path: Annotated[str, typer.Option("--db-path", help="Path to the index database")] = ".data/index.lance",
+    embedder: Annotated[str, typer.Option("--embedder", help="Embedding model (nomic, minilm)")] = "minilm",
+    force: Annotated[bool, typer.Option("--force", help="Force re-index from scratch")] = False,
 ):
-    pass
+    from src.indexer.indexer import CodeIndexer, IndexerConfig
+    import hashlib
+    
+    if force:
+        console.print("[yellow]Force re-index enabled, clearing existing data...[/yellow]")
+        from src.indexer.storage import get_index as get_storage_index
+        idx = get_storage_index(db_path)
+        repo_id = hashlib.sha256(str(repo_path).encode()).hexdigest()[:16]
+        idx.delete_by_repo(repo_id)
+    
+    config = IndexerConfig(
+        repo_path=repo_path,
+        db_path=db_path,
+        embedder_model=embedder,
+    )
+    indexer = CodeIndexer(config)
+    
+    try:
+        result = indexer.run()
+        
+        if global_options.json:
+            import json
+            console.print(json.dumps(result, indent=2))
+        else:
+            console.print("\n[bold green]Indexing complete![/bold green]")
+            console.print(f"  Repository: {result['repo_id']}")
+            console.print(f"  Files indexed: {result['files_indexed']}")
+            console.print(f"  Code units: {result['units_indexed']}")
+            stats = result['stats']
+            console.print(f"  - Files: {stats['files']}")
+            console.print(f"  - Classes: {stats['classes']}")
+            console.print(f"  - Functions: {stats['functions']}")
+            console.print(f"  - Methods: {stats['methods']}")
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise typer.Exit(1)
 
 
 @app.command()

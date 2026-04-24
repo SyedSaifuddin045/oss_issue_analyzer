@@ -18,11 +18,13 @@ dependencies = [
     "lancedb>=0.1.0",
     "sentence-transformers>=2.0.0",
     "torch>=2.0.0",
+    "scipy",
     "tree-sitter>=0.20.0",
     "tree-sitter-python",
     "tree-sitter-javascript",
     "tree-sitter-typescript",
     "tree-sitter-languages",
+    "einops",
 ]
 
 [project.scripts]

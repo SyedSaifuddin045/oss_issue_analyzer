@@ -57,10 +57,19 @@ class LocalNomicEmbedder(Embedder):
 
     def _ensure_model_loaded(self) -> None:
         if self._model is None:
-            self._model = SentenceTransformer(
-                self._model_name,
-                device=self._device,
-            )
+            try:
+                self._model = SentenceTransformer(
+                    self._model_name,
+                    device=self._device,
+                    trust_remote_code=True,
+                )
+            except TypeError:
+                self._model = SentenceTransformer(
+                    self._model_name,
+                    device=self._device,
+                    trust_remote_code=True,
+                    model_kwargs={"safe_serialization": False},
+                )
 
     def embed(self, text: str) -> list[float]:
         self._ensure_model_loaded()
