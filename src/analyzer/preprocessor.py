@@ -66,6 +66,11 @@ class IssuePreprocessor:
         r"(?:class|struct|interface)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
     ]
 
+    SYMBOL_PATTERNS = [
+        r"\b([a-zA-Z]+_[a-zA-Z0-9_]+)\b",
+        r"\b([a-z]+(?:[A-Z][a-z0-9]+)+)\b",
+    ]
+
     STACK_TRACE_PATTERNS = [
         # Python
         r'File\s+"([^"]+)",\s+line\s+(\d+)',
@@ -126,7 +131,7 @@ class IssuePreprocessor:
             return ""
         
         text = re.sub(r"```[\w]*\n[\s\S]*?```", "", text)
-        text = re.sub(r"`[^`]+`", "", text)
+        text = re.sub(r"`([^`]+)`", r"\1", text)
         text = re.sub(r"<!--[\s\S]*?-->", "", text)
         text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
         text = re.sub(r"#+", "#", text)
@@ -171,6 +176,15 @@ class IssuePreprocessor:
         seen = set()
 
         for pattern in self.FUNCTION_PATTERNS:
+            for match in re.finditer(pattern, text):
+                name = match.group(1)
+                if name and name not in seen and len(name) > 2:
+                    seen.add(name)
+                    context_start = max(0, match.start() - 20)
+                    context = text[context_start:match.start() + 20]
+                    symbols.append(ExtractedSymbol(name=name, context=context))
+
+        for pattern in self.SYMBOL_PATTERNS:
             for match in re.finditer(pattern, text):
                 name = match.group(1)
                 if name and name not in seen and len(name) > 2:

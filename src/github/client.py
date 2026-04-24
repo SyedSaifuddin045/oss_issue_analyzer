@@ -1,14 +1,23 @@
 from __future__ import annotations
+
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import httpx
 
 
-@dataclass
+ISSUE_URL_RE = re.compile(
+    r"^(?:https?://)?(?:www\.)?github\.com/"
+    r"(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/(?P<number>\d+)/?$"
+)
+ISSUE_HASH_RE = re.compile(r"^(?P<owner>[^/]+)/(?P<repo>[^/]+)#(?P<number>\d+)$")
+ISSUE_SLASH_RE = re.compile(r"^(?P<owner>[^/]+)/(?P<repo>[^/]+)/(?P<number>\d+)$")
+ISSUE_NUMBER_RE = re.compile(r"^(?P<number>\d+)$")
+
+
+@dataclass(slots=True)
 class GitHubIssue:
     number: int
     title: str
@@ -23,9 +32,10 @@ class GitHubIssue:
 class GitHubClient:
     BASE_URL = "https://api.github.com"
 
-    def __init__(self, token: Optional[str] = None):
+    def __init__(self, token: str | None = None, timeout: float = 30.0):
         self.token = token or os.environ.get("GITHUB_TOKEN")
-        self._client: Optional[httpx.Client] = None
+        self.timeout = timeout
+        self._client: httpx.Client | None = None
 
     @property
     def client(self) -> httpx.Client:
@@ -36,91 +46,67 @@ class GitHubClient:
             }
             if self.token:
                 headers["Authorization"] = f"Bearer {self.token}"
-            self._client = httpx.Client(
-                headers=headers,
-                timeout=30.0,
-            )
+            self._client = httpx.Client(headers=headers, timeout=self.timeout)
         return self._client
 
     def close(self) -> None:
-        if self._client:
+        if self._client is not None:
             self._client.close()
             self._client = None
 
-    def parse_issue_ref(self, ref: str) -> tuple[str, str, int]:
-        """Parse issue reference into owner, repo, number.
-        
-        Supports:
-        - https://github.com/owner/repo/issues/123
-        - owner/repo#123
-        - owner/repo/123
-        - 123 (requires --repo flag)
-        """
-        # URL pattern
-        url_match = re.match(
-            r"github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/(?P<number>\d+)",
-            ref,
-        )
-        if url_match:
-            return (
-                url_match.group("owner"),
-                url_match.group("repo"),
-                int(url_match.group("number")),
-            )
+    def parse_issue_ref(
+        self,
+        ref: str,
+        repo_hint: str | None = None,
+    ) -> tuple[str, str, int]:
+        """Parse an issue reference into owner, repo, and issue number."""
+        normalized = ref.strip()
 
-        # Hashtag pattern
-        hash_match = re.match(r"(?P<owner>[^/]+)/(?P<repo>[^/]+)#(?P<number>\d+)", ref)
-        if hash_match:
-            return (
-                hash_match.group("owner"),
-                hash_match.group("repo"),
-                int(hash_match.group("number")),
-            )
+        for pattern in (ISSUE_URL_RE, ISSUE_HASH_RE, ISSUE_SLASH_RE):
+            match = pattern.match(normalized)
+            if match:
+                return (
+                    match.group("owner"),
+                    match.group("repo"),
+                    int(match.group("number")),
+                )
 
-        # Slash pattern
-        slash_match = re.match(r"(?P<owner>[^/]+)/(?P<repo>[^/]+)/(?P<number>\d+)", ref)
-        if slash_match:
-            return (
-                slash_match.group("owner"),
-                slash_match.group("repo"),
-                int(slash_match.group("number")),
-            )
+        number_match = ISSUE_NUMBER_RE.match(normalized)
+        if number_match and repo_hint:
+            owner, repo = self._parse_repo_hint(repo_hint)
+            return owner, repo, int(number_match.group("number"))
 
         raise ValueError(f"Invalid issue reference: {ref}")
+
+    def _parse_repo_hint(self, repo_hint: str) -> tuple[str, str]:
+        parts = repo_hint.strip().split("/", maxsplit=1)
+        if len(parts) != 2 or not all(parts):
+            raise ValueError(f"Invalid repository reference: {repo_hint}")
+        return parts[0], parts[1]
 
     def get_issue(self, owner: str, repo: str, issue_num: int) -> GitHubIssue:
         """Fetch a single issue from a repository."""
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{issue_num}"
         response = self.client.get(url)
         response.raise_for_status()
-        data = response.json()
-
-        return GitHubIssue(
-            number=data["number"],
-            title=data["title"],
-            body=data.get("body", ""),
-            state=data["state"],
-            html_url=data["html_url"],
-            user_login=data["user"]["login"],
-            created_at=data["created_at"],
-            labels=[label["name"] for label in data.get("labels", [])],
-        )
+        return self._build_issue(response.json())
 
     def get_issues(
         self,
         owner: str,
         repo: str,
         state: str = "open",
-        labels: Optional[list[str]] = None,
+        labels: list[str] | None = None,
     ) -> list[GitHubIssue]:
-        """Fetch issues from a repository."""
+        """Fetch issues from a repository, excluding pull requests."""
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues"
-        params = {"state": state, "per_page": 100}
+        params: dict[str, str | int] = {"state": state, "per_page": 100}
         if labels:
             params["labels"] = ",".join(labels)
 
-        issues = []
+        issues: list[GitHubIssue] = []
         page = 1
+
         while True:
             params["page"] = page
             response = self.client.get(url, params=params)
@@ -133,18 +119,7 @@ class GitHubClient:
             for item in data:
                 if "pull_request" in item:
                     continue
-                issues.append(
-                    GitHubIssue(
-                        number=item["number"],
-                        title=item["title"],
-                        body=item.get("body", ""),
-                        state=item["state"],
-                        html_url=item["html_url"],
-                        user_login=item["user"]["login"],
-                        created_at=item["created_at"],
-                        labels=[label["name"] for label in item.get("labels", [])],
-                    )
-                )
+                issues.append(self._build_issue(item))
 
             if len(data) < 100:
                 break
@@ -152,27 +127,42 @@ class GitHubClient:
 
         return issues
 
+    def _build_issue(self, data: dict) -> GitHubIssue:
+        return GitHubIssue(
+            number=data["number"],
+            title=data["title"],
+            body=data.get("body") or "",
+            state=data["state"],
+            html_url=data["html_url"],
+            user_login=data["user"]["login"],
+            created_at=data["created_at"],
+            labels=[label["name"] for label in data.get("labels", [])],
+        )
+
 
 def load_issue_from_file(path: str) -> GitHubIssue:
-    """Load an issue from a local markdown file."""
+    """Load a local markdown issue file with a leading `# title` heading."""
     file_path = Path(path)
     if not file_path.exists():
         raise ValueError(f"File not found: {path}")
 
     content = file_path.read_text(encoding="utf-8")
-    lines = content.split("\n")
+    lines = content.splitlines()
 
     title = ""
-    body_lines = []
+    body_lines: list[str] = []
     in_body = False
 
     for line in lines:
-        if line.startswith("# "):
+        if not title and line.startswith("# "):
             title = line[2:].strip()
             in_body = True
             continue
         if in_body:
             body_lines.append(line)
+
+    if not title:
+        raise ValueError(f"Issue file must start with a '# ' title heading: {path}")
 
     body = "\n".join(body_lines).strip()
 
@@ -181,15 +171,11 @@ def load_issue_from_file(path: str) -> GitHubIssue:
         title=title,
         body=body,
         state="open",
-        html_url=f"file://{path}",
+        html_url=file_path.resolve().as_uri(),
         user_login="local",
         created_at="",
         labels=[],
     )
 
 
-__all__ = [
-    "GitHubClient",
-    "GitHubIssue",
-    "load_issue_from_file",
-]
+__all__ = ["GitHubClient", "GitHubIssue", "load_issue_from_file"]

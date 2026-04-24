@@ -38,6 +38,8 @@ class CodeIndexer:
         repo_path = Path(self.config.repo_path).resolve()
         if not repo_path.exists():
             raise ValueError(f"Path does not exist: {repo_path}")
+        if not repo_path.is_dir():
+            raise ValueError(f"Repository path must be a directory: {repo_path}")
 
         self.console.print(f"[bold blue]Indexing repository:[/bold blue] {repo_path}")
 
@@ -78,13 +80,8 @@ class CodeIndexer:
     def _get_or_create_repo(self, repo_path: Path) -> str:
         repo_id = hashlib.sha256(str(repo_path).encode()).hexdigest()[:16]
         
-        existing = self.vector_store.get_repository(repo_id)
-        if existing:
-            self.console.print(f"Using existing repository: {repo_id}")
-            return repo_id
-        
         detected_lang = self._detect_language(repo_path)
-        
+
         repo = Repository(
             id=repo_id,
             name=repo_path.name,
@@ -93,8 +90,8 @@ class CodeIndexer:
             indexed_at=datetime.utcnow(),
         )
         self.vector_store.add_repository(repo)
-        self.console.print(f"Created repository: {repo_id} (language: {detected_lang})")
-        
+        self.console.print(f"Prepared repository: {repo_id} (language: {detected_lang})")
+
         return repo_id
 
     def _detect_language(self, repo_path: Path) -> str:
@@ -154,6 +151,8 @@ class CodeIndexer:
         existing_hash = self.vector_store.get_file_hash(self.repo_id, relative_path)
         if existing_hash == file_hash:
             return 0
+        if existing_hash is not None:
+            self.vector_store.delete_by_file(self.repo_id, relative_path)
         
         try:
             parsed = parser.parse_file(content, relative_path, self.repo_id)
@@ -188,7 +187,12 @@ class CodeIndexer:
                 embeddings_map[unit_id] = embeddings_list[i]
         
         try:
-            return self.vector_store.add_code_units(all_units, self.repo_id, embeddings_map)
+            return self.vector_store.add_code_units(
+                all_units,
+                self.repo_id,
+                embeddings_map,
+                file_hash=file_hash,
+            )
         except Exception as e:
             self.console.print(f"[dim]Storage error: {file_path}: {e}[/dim]")
             return 0
@@ -216,7 +220,7 @@ def index_repository(
         embedder_model=embedder,
     )
     indexer = CodeIndexer(config)
-    return indexer.index()
+    return indexer.run()
 
 
 __all__ = [

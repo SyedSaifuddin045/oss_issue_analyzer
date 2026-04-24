@@ -15,6 +15,7 @@ dependencies = [
     "rich>=15.0.0",
     "typer>=0.24.1",
     "pydantic>=2.0.0",
+    "httpx>=0.27.0",
     "lancedb>=0.1.0",
     "sentence-transformers>=2.0.0",
     "torch>=2.0.0",
@@ -27,7 +28,15 @@ dependencies = [
     "einops",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
 [project.scripts]
 oss-issue-analyzer = "src.__main__:app"
 start = "src.__main__:app"
 dev = "src.__main__:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

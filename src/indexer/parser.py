@@ -128,12 +128,19 @@ class MultiLanguageParser:
     LANGUAGE_MAP: dict[str, type[LanguageParser]] = {}
 
     @classmethod
+    def _ensure_registered(cls) -> None:
+        if cls.LANGUAGE_MAP:
+            return
+        from src.indexer import languages  # noqa: F401
+
+    @classmethod
     def register(cls, parser_class: type[LanguageParser]) -> None:
         instance = parser_class()
         cls.LANGUAGE_MAP[instance.language] = parser_class
 
     @classmethod
     def for_language(cls, language: str) -> Optional[LanguageParser]:
+        cls._ensure_registered()
         parser_class = cls.LANGUAGE_MAP.get(language.lower())
         if parser_class:
             return parser_class()
@@ -141,6 +148,7 @@ class MultiLanguageParser:
 
     @classmethod
     def for_extension(cls, ext: str) -> Optional[LanguageParser]:
+        cls._ensure_registered()
         ext = ext if ext.startswith(".") else f".{ext}"
         for parser in cls.LANGUAGE_MAP.values():
             if ext in parser().file_extensions:
@@ -149,10 +157,12 @@ class MultiLanguageParser:
 
     @classmethod
     def supported_languages(cls) -> list[str]:
+        cls._ensure_registered()
         return list(cls.LANGUAGE_MAP.keys())
 
     @classmethod
     def supported_extensions(cls) -> list[str]:
+        cls._ensure_registered()
         extensions = set()
         for parser in cls.LANGUAGE_MAP.values():
             extensions.update(parser().file_extensions)

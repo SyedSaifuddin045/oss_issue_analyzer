@@ -34,15 +34,15 @@ class PythonParser(LanguageParser):
         if node.type in ("function_definition", "class_definition", "async_function_definition"):
             for child in node.children:
                 if child.type == "identifier":
-                    text = node.text
+                    text = child.text
                     if text:
-                        return text.decode().split("\n")[0].strip()
+                        return text.decode()
         if node.type == "method_definition":
             for child in node.children:
                 if child.type == "identifier":
-                    text = node.text
+                    text = child.text
                     if text:
-                        return text.decode().split("\n")[0].strip()
+                        return text.decode()
         return ""
 
     def _extract_signature(self, node, source: str) -> str:

@@ -60,14 +60,14 @@ def start(ctx: typer.Context):
 @app.command()
 def analyze(
     issue_ref: Annotated[str, typer.Argument(help="Issue URL, number, or path to local markdown file")],
-    repo_path: Annotated[Optional[str], typer.Option("--repo", "-r", help="Path to the local repository (required for local file)")] = None,
+    repo_path: Annotated[str, typer.Option("--repo", "-r", help="Path to the local indexed repository")] = ".",
     db_path: Annotated[str, typer.Option("--db-path", help="Path to the index database")] = ".data/index.lance",
     embedder: Annotated[str, typer.Option("--embedder", help="Embedding model (nomic, minilm)")] = "minilm",
     limit: Annotated[int, typer.Option("--limit", "-l", help="Number of code units to retrieve")] = 10,
-    repo_flag: Annotated[Optional[str], typer.Option("--gh-repo", help="GitHub repo in owner/repo format (for URL-based issues)")] = None,
+    repo_flag: Annotated[Optional[str], typer.Option("--gh-repo", help="GitHub repo in owner/repo format for plain issue numbers")] = None,
 ):
-    import hashlib
     from pathlib import Path
+    import hashlib
     
     from src.github.client import GitHubClient, load_issue_from_file
     from src.analyzer.preprocessor import IssuePreprocessor
@@ -75,43 +75,33 @@ def analyze(
     from src.analyzer.scorer import HeuristicScorer
     from src.indexer.storage import VectorStore
     from rich.panel import Panel
-    from rich.table import Table
-    from rich.markdown import Markdown
     
     try:
-        repo_id = None
-        
-        if repo_path:
-            repo_path = Path(repo_path).resolve()
-            if not repo_path.exists():
-                console.print(f"[bold red]Error:[/bold red] Repository path does not exist: {repo_path}")
-                raise typer.Exit(1)
-            repo_id = hashlib.sha256(str(repo_path).encode()).hexdigest()[:16]
-        elif repo_flag:
-            repo_id = hashlib.sha256(str(repo_flag).encode()).hexdigest()[:16]
-        else:
-            console.print(f"[bold red]Error:[/bold red] Please provide --repo path or use local issue file")
+        repo_dir = Path(repo_path).resolve()
+        if not repo_dir.exists():
+            console.print(f"[bold red]Error:[/bold red] Repository path does not exist: {repo_dir}")
             raise typer.Exit(1)
+        if not repo_dir.is_dir():
+            console.print(f"[bold red]Error:[/bold red] Repository path must be a directory: {repo_dir}")
+            raise typer.Exit(1)
+
+        repo_id = hashlib.sha256(str(repo_dir).encode()).hexdigest()[:16]
         
         vector_store = VectorStore(db_path)
         existing_repo = vector_store.get_repository(repo_id)
         if not existing_repo:
-            console.print(f"[bold red]Error:[/bold red] Repository not indexed. Run 'start index <repo_path>' first.")
+            console.print("[bold red]Error:[/bold red] Repository not indexed. Run 'oss-issue-analyzer index <repo_path>' first.")
             raise typer.Exit(1)
         
         if Path(issue_ref).exists():
             issue = load_issue_from_file(issue_ref)
         else:
-            client = GitHubClient(api_key=global_options.api_key)
+            client = GitHubClient(token=global_options.api_key)
             try:
-                if repo_flag:
-                    owner, repo, number = client.parse_issue_ref(issue_ref)
-                    issue = client.get_issue(owner, repo, number)
-                else:
-                    console.print(f"[bold red]Error:[/bold red] For GitHub issues, specify --repo flag (e.g., --repo owner/repo)")
-                    raise typer.Exit(1)
-            except ValueError:
-                console.print(f"[bold red]Error:[/bold red] Invalid issue reference: {issue_ref}")
+                owner, repo, number = client.parse_issue_ref(issue_ref, repo_hint=repo_flag)
+                issue = client.get_issue(owner, repo, number)
+            except ValueError as exc:
+                console.print(f"[bold red]Error:[/bold red] {exc}")
                 raise typer.Exit(1)
             finally:
                 client.close()
@@ -166,12 +156,6 @@ def analyze(
         
         console.print("\n[bold]Files involved:[/bold]")
         for us in result.units[:5]:
-            if us.difficulty_score < 0.3:
-                score_indicator = "✓"
-            elif us.difficulty_score > 0.6:
-                score_indicator = "✗"
-            else:
-                score_indicator = "○"
             console.print(f"  → {us.unit.path}")
         
         if result.suggested_approach:
@@ -209,12 +193,13 @@ def index(
 ):
     from src.indexer.indexer import CodeIndexer, IndexerConfig
     import hashlib
+    from pathlib import Path
     
     if force:
         console.print("[yellow]Force re-index enabled, clearing existing data...[/yellow]")
         from src.indexer.storage import get_index as get_storage_index
         idx = get_storage_index(db_path)
-        repo_id = hashlib.sha256(str(repo_path).encode()).hexdigest()[:16]
+        repo_id = hashlib.sha256(str(Path(repo_path).resolve()).encode()).hexdigest()[:16]
         idx.delete_by_repo(repo_id)
     
     config = IndexerConfig(

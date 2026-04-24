@@ -30,6 +30,14 @@ class JavaScriptParser(LanguageParser):
         }
         return mapping.get(node_type, UnitType.FILE)
 
+    def _extract_name(self, node) -> str:
+        for child in node.children:
+            if child.type == "identifier" and child.text:
+                return child.text.decode()
+            if child.type == "property_identifier" and child.text:
+                return child.text.decode()
+        return ""
+
 
 class TypeScriptParser(LanguageParser):
     @property
@@ -58,6 +66,14 @@ class TypeScriptParser(LanguageParser):
             "type_alias_declaration": UnitType.CLASS,
         }
         return mapping.get(node_type, UnitType.FILE)
+
+    def _extract_name(self, node) -> str:
+        for child in node.children:
+            if child.type == "identifier" and child.text:
+                return child.text.decode()
+            if child.type == "property_identifier" and child.text:
+                return child.text.decode()
+        return ""
 
 
 class TSXParser(LanguageParser):
