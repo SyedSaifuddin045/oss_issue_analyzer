@@ -3,7 +3,7 @@ from typing import Annotated, Optional
 import typer
 from rich.console import Console
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 app = typer.Typer(add_completion=False, invoke_without_command=True)
 console = Console()
