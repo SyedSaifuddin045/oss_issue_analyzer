@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +11,8 @@ import pyarrow as pa
 from lancedb.pydantic import LanceModel
 
 from src.indexer.parser import ParsedUnit
+
+INDEX_SCHEMA_VERSION = 2
 
 
 def get_code_unit_schema(default_vector_size: int = 768) -> pa.Schema:
@@ -29,6 +32,7 @@ def get_code_unit_schema(default_vector_size: int = 768) -> pa.Schema:
             pa.field("indexed_at", pa.timestamp("us")),
             pa.field("name", pa.string()),
             pa.field("parent_name", pa.string()),
+            pa.field("asset_kind", pa.string()),
             pa.field("vector", pa.list_(pa.float32(), default_vector_size)),
         ]
     )
@@ -67,6 +71,7 @@ class CodeUnit(LanceModel):
     indexed_at: datetime = field(default_factory=datetime.utcnow)
     name: str | None = None
     parent_name: str | None = None
+    asset_kind: str = "code"
     vector: list[float]
 
     @staticmethod
@@ -79,6 +84,8 @@ class Repository(LanceModel):
     name: str
     path: str
     language: str
+    schema_version: int = INDEX_SCHEMA_VERSION
+    index_mode: str = "mixed"
     indexed_at: datetime = field(default_factory=datetime.utcnow)
 
 
@@ -135,6 +142,7 @@ class VectorStore:
                 "indexed_at": datetime.utcnow(),
                 "name": unit.name or None,
                 "parent_name": unit.parent_name,
+                "asset_kind": unit.asset_kind.value,
                 "vector": self._normalize_embedding(embeddings.get(unit.id)),
             }
             records.append(record)
@@ -254,6 +262,42 @@ class VectorStore:
                 return repo
         return None
 
+    def is_compatible_schema(self) -> bool:
+        table_names = set(self.db.table_names())
+        if "code_units" in table_names:
+            code_fields = set(self._get_code_unit_table().schema.names)
+            if "asset_kind" not in code_fields:
+                return False
+        if "repositories" in table_names:
+            repo_fields = set(self._get_repo_table().schema.names)
+            if "schema_version" not in repo_fields or "index_mode" not in repo_fields:
+                return False
+        return True
+
+    def validate_repo_compatibility(self, repo_id: str) -> tuple[bool, str | None]:
+        if not self.is_compatible_schema():
+            return False, (
+                "Index schema is outdated. Re-run 'oss-issue-analyzer index <repo_path> --force' "
+                "to rebuild the index."
+            )
+
+        repo = self.get_repository(repo_id)
+        if not repo:
+            return True, None
+
+        schema_version = repo.get("schema_version")
+        if schema_version != INDEX_SCHEMA_VERSION:
+            return False, (
+                "Repository index is outdated. Re-run 'oss-issue-analyzer index <repo_path> --force' "
+                "to rebuild the index."
+            )
+        return True, None
+
+    def reset(self) -> None:
+        if self.db_path.exists():
+            shutil.rmtree(self.db_path)
+        self.db = lancedb.connect(str(self.db_path))
+
     def get_stats(self, repo_id: str) -> dict:
         try:
             all_units = self._get_code_unit_table().to_arrow().to_pylist()
@@ -324,6 +368,7 @@ CodeIndex = VectorStore
 
 
 __all__ = [
+    "INDEX_SCHEMA_VERSION",
     "CodeUnit",
     "Repository",
     "VectorStore",

@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from src.indexer.indexer import CodeIndexer, IndexerConfig, index_repository
-from src.indexer.parser import ParsedUnit, UnitType
+from src.indexer.parser import AssetKind, ParsedUnit, UnitType
 
 
 class FakeEmbedder:
@@ -23,6 +23,9 @@ class FakeVectorStore:
 
     def get_repository(self, repo_id: str):
         return self.repos.get(repo_id)
+
+    def validate_repo_compatibility(self, repo_id: str):
+        return True, None
 
     def add_repository(self, repo) -> None:
         self.repos[repo.id] = repo.model_dump()
@@ -119,6 +122,90 @@ class IndexerTests(unittest.TestCase):
             self.assertEqual(units_added, 2)
             self.assertEqual(fake_store.deleted_files, [(repo_id, "app.py")])
             self.assertTrue(fake_store.added_payloads[0][3].startswith("hash:app.py:"))
+
+    def test_discover_files_in_mixed_mode_includes_curated_non_code_assets(self) -> None:
+        import src.indexer.indexer as indexer_module
+        import src.indexer.storage as storage_module
+
+        with TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            fake_store = FakeVectorStore(str(tmp_path / "index.lance"))
+            original_vector_store = storage_module.VectorStore
+            storage_module.VectorStore = lambda db_path: fake_store
+            self.addCleanup(setattr, storage_module, "VectorStore", original_vector_store)
+
+            repo_path = tmp_path / "repo"
+            (repo_path / "docs").mkdir(parents=True)
+            (repo_path / ".github" / "workflows").mkdir(parents=True)
+            (repo_path / "app.py").write_text("print('hello')\n", encoding="utf-8")
+            (repo_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+            (repo_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+            (repo_path / "docs" / "guide.md").write_text("# Guide\n", encoding="utf-8")
+            (repo_path / ".github" / "workflows" / "ci.yml").write_text("name: CI\n", encoding="utf-8")
+            (repo_path / "notes.txt").write_text("ignore me\n", encoding="utf-8")
+
+            indexer = CodeIndexer(
+                IndexerConfig(repo_path=str(repo_path), db_path=str(tmp_path / "index.lance"))
+            )
+
+            discovered = {
+                path.relative_to(repo_path).as_posix(): asset_kind
+                for path, asset_kind in indexer._discover_files(repo_path)
+            }
+
+            self.assertEqual(discovered["app.py"], AssetKind.CODE)
+            self.assertEqual(discovered["pyproject.toml"], AssetKind.CONFIG)
+            self.assertEqual(discovered["README.md"], AssetKind.DOCS)
+            self.assertEqual(discovered["docs/guide.md"], AssetKind.DOCS)
+            self.assertEqual(discovered[".github/workflows/ci.yml"], AssetKind.WORKFLOW)
+            self.assertNotIn("notes.txt", discovered)
+
+    def test_index_file_builds_non_code_unit_and_honors_code_only_mode(self) -> None:
+        import src.indexer.indexer as indexer_module
+        import src.indexer.storage as storage_module
+
+        with TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            fake_store = FakeVectorStore(str(tmp_path / "index.lance"))
+            original_vector_store = storage_module.VectorStore
+            original_get_embedder = indexer_module.get_embedder
+
+            storage_module.VectorStore = lambda db_path: fake_store
+            indexer_module.get_embedder = lambda model, device: FakeEmbedder()
+            self.addCleanup(setattr, storage_module, "VectorStore", original_vector_store)
+            self.addCleanup(setattr, indexer_module, "get_embedder", original_get_embedder)
+
+            repo_path = tmp_path / "repo"
+            repo_path.mkdir()
+            config_file = repo_path / "pyproject.toml"
+            config_file.write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+
+            mixed_indexer = CodeIndexer(
+                IndexerConfig(repo_path=str(repo_path), db_path=str(tmp_path / "index.lance"))
+            )
+            repo_id = mixed_indexer._get_or_create_repo(repo_path)
+            mixed_indexer.repo_id = repo_id
+
+            units_added = mixed_indexer._index_file(config_file, repo_path, AssetKind.CONFIG)
+
+            self.assertEqual(units_added, 1)
+            added_unit = fake_store.added_payloads[0][0][0]
+            self.assertEqual(added_unit.asset_kind, AssetKind.CONFIG)
+            self.assertEqual(added_unit.unit_type, UnitType.CONFIG)
+            self.assertEqual(added_unit.name, "pyproject.toml")
+
+            code_only_indexer = CodeIndexer(
+                IndexerConfig(
+                    repo_path=str(repo_path),
+                    db_path=str(tmp_path / "index.lance"),
+                    index_mode="code-only",
+                )
+            )
+            discovered = {
+                path.relative_to(repo_path).as_posix()
+                for path, _asset_kind in code_only_indexer._discover_files(repo_path)
+            }
+            self.assertNotIn("pyproject.toml", discovered)
 
     def test_index_repository_calls_run(self) -> None:
         captured: dict[str, str] = {}

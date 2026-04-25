@@ -15,6 +15,15 @@ class UnitType(str, Enum):
     FUNCTION = "function"
     METHOD = "method"
     MODULE = "module"
+    DOCUMENT = "document"
+    CONFIG = "config"
+
+
+class AssetKind(str, Enum):
+    CODE = "code"
+    CONFIG = "config"
+    DOCS = "docs"
+    WORKFLOW = "workflow"
 
 
 @dataclass
@@ -31,6 +40,7 @@ class ParsedUnit:
     code: str = ""
     name: str = ""
     parent_name: Optional[str] = None
+    asset_kind: AssetKind = AssetKind.CODE
     children: list[ParsedUnit] = field(default_factory=list)
 
 
@@ -180,6 +190,7 @@ def get_parser_for_file(file_path: str) -> Optional[LanguageParser]:
 
 __all__ = [
     "UnitType",
+    "AssetKind",
     "ParsedUnit",
     "LanguageParser",
     "MultiLanguageParser",

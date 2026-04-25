@@ -1,4 +1,9 @@
+from __future__ import annotations
+
+import importlib
+
 from src.indexer.parser import (
+    AssetKind,
     LanguageParser,
     MultiLanguageParser,
     ParsedUnit,
@@ -7,13 +12,9 @@ from src.indexer.parser import (
     get_parser_for_file,
 )
 
-from src.indexer.languages import JavaScriptParser, PythonParser, TypeScriptParser
-from src.indexer.embedder import Embedder, LocalNomicEmbedder, MiniLMEmbedder, get_embedder
-from src.indexer.storage import VectorStore, CodeUnit, Repository, get_index
-from src.indexer.indexer import CodeIndexer, IndexerConfig, index_repository
-
 __all__ = [
     "UnitType",
+    "AssetKind",
     "ParsedUnit",
     "LanguageParser",
     "MultiLanguageParser",
@@ -34,3 +35,19 @@ __all__ = [
     "IndexerConfig",
     "index_repository",
 ]
+
+
+def __getattr__(name: str):
+    if name in {"PythonParser", "JavaScriptParser", "TypeScriptParser"}:
+        module = importlib.import_module("src.indexer.languages")
+        return getattr(module, name)
+    if name in {"Embedder", "LocalNomicEmbedder", "MiniLMEmbedder", "get_embedder"}:
+        module = importlib.import_module("src.indexer.embedder")
+        return getattr(module, name)
+    if name in {"VectorStore", "CodeUnit", "Repository", "get_index"}:
+        module = importlib.import_module("src.indexer.storage")
+        return getattr(module, name)
+    if name in {"CodeIndexer", "IndexerConfig", "index_repository"}:
+        module = importlib.import_module("src.indexer.indexer")
+        return getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -4,6 +4,7 @@ from enum import Enum
 from typing import Optional
 
 from src.analyzer.retriever import RetrievedUnit, RetrievalResult
+from src.indexer.parser import AssetKind
 
 
 class DifficultyLabel(str, Enum):
@@ -94,6 +95,9 @@ class HeuristicScorer:
         return scored
 
     def _compute_unit_score(self, unit: RetrievedUnit) -> float:
+        if unit.asset_kind != AssetKind.CODE.value:
+            return self._compute_non_code_score(unit)
+
         score = 0.0
         
         if unit.unit_type == "function":
@@ -117,10 +121,52 @@ class HeuristicScorer:
         
         return min(score, 1.0)
 
+    def _compute_non_code_score(self, unit: RetrievedUnit) -> float:
+        loc = unit.code.count("\n")
+
+        if unit.asset_kind == AssetKind.DOCS.value:
+            score = 0.12
+        elif unit.asset_kind == AssetKind.WORKFLOW.value:
+            score = 0.3
+        else:
+            score = 0.24
+
+        if unit.match_type == "explicit":
+            score -= 0.08
+        elif unit.match_type == "keyword":
+            score -= 0.03
+
+        score += min(loc / 800, 0.18)
+        return min(max(score, 0.05), 1.0)
+
     def _extract_unit_signals(
         self, unit: RetrievedUnit, score: float
     ) -> list[ContributorSignal]:
         signals = []
+
+        if unit.asset_kind != AssetKind.CODE.value:
+            if unit.asset_kind == AssetKind.DOCS.value:
+                signals.append(
+                    ContributorSignal(
+                        is_positive=True,
+                        message="Documentation change is easier to validate"
+                    )
+                )
+            elif unit.asset_kind == AssetKind.WORKFLOW.value:
+                signals.append(
+                    ContributorSignal(
+                        is_positive=False,
+                        message="CI workflow changes can affect automation"
+                    )
+                )
+            else:
+                signals.append(
+                    ContributorSignal(
+                        is_positive=True,
+                        message="Configuration scope is usually file-local"
+                    )
+                )
+            return signals
         
         if unit.is_test:
             signals.append(
@@ -245,17 +291,25 @@ class HeuristicScorer:
         )
 
         for i, us in enumerate(sorted_units[:3]):
-            if us.unit.name:
-                suggestions.append(
-                    f"{i+1}. Start in {us.unit.path} -> {us.unit.name}"
-                )
+            if us.unit.asset_kind == AssetKind.DOCS.value:
+                suggestions.append(f"{i+1}. Start in {us.unit.path}")
+            elif us.unit.asset_kind == AssetKind.WORKFLOW.value:
+                suggestions.append(f"{i+1}. Check {us.unit.path} for related workflow changes")
+            elif us.unit.asset_kind == AssetKind.CONFIG.value:
+                suggestions.append(f"{i+1}. Check {us.unit.path} for related configuration")
+            elif us.unit.name and us.unit.name != us.unit.path:
+                suggestions.append(f"{i+1}. Start in {us.unit.path} -> {us.unit.name}")
             else:
-                suggestions.append(
-                    f"{i+1}. Start in {us.unit.path}"
-                )
+                suggestions.append(f"{i+1}. Start in {us.unit.path}")
 
         if retrieval.issue.issue_type == "bug":
-            files = list(set(u.unit.path for u in sorted_units[:3] if u.unit.path))
+            files = list(
+                {
+                    u.unit.path
+                    for u in sorted_units[:3]
+                    if u.unit.path and u.unit.asset_kind == AssetKind.CODE.value
+                }
+            )
             if files:
                 test_hints = self._find_test_files(files[0])
                 if test_hints:

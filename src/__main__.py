@@ -117,6 +117,10 @@ def analyze(
         repo_id = hashlib.sha256(str(repo_dir).encode()).hexdigest()[:16]
         
         vector_store = VectorStore(db_path)
+        is_compatible, compatibility_error = vector_store.validate_repo_compatibility(repo_id)
+        if not is_compatible:
+            console.print(f"[bold red]Error:[/bold red] {compatibility_error}")
+            raise typer.Exit(1)
         existing_repo = vector_store.get_repository(repo_id)
         if not existing_repo:
             console.print("[bold red]Error:[/bold red] Repository not indexed. Run 'oss-issue-analyzer index <repo_path>' first.")
@@ -195,7 +199,7 @@ def analyze(
             border_style=difficulty_color,
         ))
         
-        console.print("\n[bold]Files involved:[/bold]")
+        console.print("\n[bold]Relevant files:[/bold]")
         for us in result.units[:5]:
             console.print(f"  → {us.unit.path}")
         
@@ -230,27 +234,41 @@ def index(
     repo_path: Annotated[str, typer.Argument(help="Path to the repository")],
     db_path: Annotated[Optional[str], typer.Option("--db-path", help="Path to index database (default: <repo_path>/.oss-index)")] = None,
     embedder: Annotated[str, typer.Option("--embedder", help="Embedding model (nomic, minilm)")] = "minilm",
+    index_mode: Annotated[str, typer.Option("--index-mode", help="Index mode (mixed, code-only)")] = "mixed",
     force: Annotated[bool, typer.Option("--force", help="Force re-index from scratch")] = False,
 ):
     from src.indexer.indexer import CodeIndexer, IndexerConfig
     import hashlib
+    import shutil
     from pathlib import Path
+    from src.indexer.storage import VectorStore
     
     repo_dir = Path(repo_path).resolve()
     if db_path is None:
         db_path = str(repo_dir / ".oss-index" / "index.lance")
+
+    if index_mode not in {"mixed", "code-only"}:
+        console.print("[bold red]Error:[/bold red] --index-mode must be 'mixed' or 'code-only'.")
+        raise typer.Exit(1)
     
     if force:
         console.print("[yellow]Force re-index enabled, clearing existing data...[/yellow]")
-        from src.indexer.storage import get_index as get_storage_index
-        idx = get_storage_index(db_path)
+        db_dir = Path(db_path)
+        if db_dir.exists():
+            shutil.rmtree(db_dir)
+    else:
         repo_id = hashlib.sha256(str(repo_dir).encode()).hexdigest()[:16]
-        idx.delete_by_repo(repo_id)
+        vector_store = VectorStore(db_path)
+        is_compatible, compatibility_error = vector_store.validate_repo_compatibility(repo_id)
+        if not is_compatible:
+            console.print(f"[bold red]Error:[/bold red] {compatibility_error}")
+            raise typer.Exit(1)
     
     config = IndexerConfig(
         repo_path=repo_path,
         db_path=db_path,
         embedder_model=embedder,
+        index_mode=index_mode,
     )
     indexer = CodeIndexer(config)
     
@@ -263,8 +281,9 @@ def index(
         else:
             console.print("\n[bold green]Indexing complete![/bold green]")
             console.print(f"  Repository: {result['repo_id']}")
+            console.print(f"  Index mode: {result['index_mode']}")
             console.print(f"  Files indexed: {result['files_indexed']}")
-            console.print(f"  Code units: {result['units_indexed']}")
+            console.print(f"  Indexed units: {result['units_indexed']}")
             stats = result['stats']
             console.print(f"  - Files: {stats['files']}")
             console.print(f"  - Classes: {stats['classes']}")

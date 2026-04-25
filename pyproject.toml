@@ -26,6 +26,8 @@ dependencies = [
     "tree-sitter-typescript",
     "tree-sitter-languages",
     "einops",
+    "build>=1.4.4",
+    "twine>=6.2.0",
 ]
 
 [dependency-groups]

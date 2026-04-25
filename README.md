@@ -1,10 +1,10 @@
 # OSS Issue Analyzer
 
-A CLI tool that helps first-time open source contributors analyze GitHub issues against their local cloned repositories. It indexes code, estimates difficulty, and helps contributors pick issues they can realistically solve.
+A CLI tool that helps first-time open source contributors analyze GitHub issues against their local cloned repositories. It indexes code plus selected project text assets, estimates difficulty, and helps contributors pick issues they can realistically solve.
 
 ## Features
 
-- **Local Code Indexing** - Parse and index Python, JavaScript, and TypeScript code
+- **Mixed Repository Indexing** - Parse code and index selected config, workflow, and documentation files
 - **GitHub Issue Integration** - Fetch issues directly from GitHub
 - **Difficulty Estimation** - Heuristic-based scoring for issue complexity
 - **Hybrid Retrieval** - Semantic + keyword search against indexed code
@@ -31,7 +31,7 @@ cd /path/to/repo
 oss-issue-analyzer index .
 ```
 
-This creates a `.oss-index/` folder in the repository root containing vector embeddings.
+This creates a `.oss-index/` folder in the repository root containing vector embeddings for code and selected project text assets.
 
 ### 2. Analyze an Issue
 
@@ -55,19 +55,20 @@ oss-issue-analyzer analyze ./issue.md
 
 ### `index`
 
-Index a local repository for code analysis.
+Index a local repository for issue analysis.
 
 ```bash
 oss-issue-analyzer index <repo_path> [OPTIONS]
 
 Options:
   --embedder  Embedding model (nomic, minilm) [default: minilm]
+  --index-mode  Index mode (mixed, code-only) [default: mixed]
   --force    Force re-index from scratch
 ```
 
 ### `analyze`
 
-Analyze a GitHub issue against the indexed codebase.
+Analyze a GitHub issue against the indexed repository snapshot.
 
 ```bash
 oss-issue-analyzer analyze <issue_ref> [OPTIONS]
@@ -79,7 +80,7 @@ Options:
   --repo           Path to indexed repository
   --db-path        Path to index database
   --embedder       Embedding model [default: minilm]
-  --limit         Number of code units to retrieve [default: 10]
+  --limit         Number of indexed units to retrieve [default: 10]
   --gh-repo       GitHub repo (owner/repo) - auto-detected if not provided
 ```
 
@@ -90,7 +91,7 @@ Options:
 │ Difficulty: EASY (conf: 88%)                                   │
 │ Relative: Easier than 75%                                      │
 │                                                                │
-│ Files involved:                                                │
+│ Relevant files:                                                │
 │   → src/tokenizer.py                                           │
 │   → tests/test_tokenizer.py                                    │
 │                                                                │
@@ -118,6 +119,14 @@ Options:
 Index data is stored in `.oss-index/` folder in the repository root:
 - `index.lance/code_units.lance` - Vector embeddings
 - `index.lance/repositories.lance` - Repository metadata
+
+If you indexed a repository with an older version of the tool, re-run:
+
+```bash
+oss-issue-analyzer index . --force
+```
+
+The mixed index adds schema metadata and stores non-code assets alongside code units.
 
 ## Development
 

@@ -1,10 +1,18 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from src.analyzer.preprocessor import ProcessedIssue
-from src.indexer.embedder import Embedder, get_embedder
-from src.indexer.parser import UnitType
+from src.analyzer.preprocessor import IssueType, ProcessedIssue
+from src.indexer.parser import AssetKind, UnitType
+
+if TYPE_CHECKING:
+    from src.indexer.embedder import Embedder
+
+
+def get_embedder(model: str):
+    from src.indexer.embedder import get_embedder as load_embedder
+
+    return load_embedder(model)
 
 
 @dataclass
@@ -19,6 +27,7 @@ class RetrievedUnit:
     signature: Optional[str]
     docstring: Optional[str]
     code: str
+    asset_kind: str = AssetKind.CODE.value
     score: float = 0.0
     match_type: str = "semantic"
     is_test: bool = False
@@ -127,7 +136,13 @@ class HybridRetriever:
                     signature=r.get("signature"),
                     docstring=r.get("docstring"),
                     code=r.get("code", "")[:500],
-                    score=r.get("_score", 0.0),
+                    asset_kind=r.get("asset_kind", AssetKind.CODE.value),
+                    score=self._adjust_semantic_score(
+                        r.get("_score", 0.0),
+                        r.get("asset_kind", AssetKind.CODE.value),
+                        r.get("path", ""),
+                        issue,
+                    ),
                     match_type="semantic",
                     is_test=self._is_test_file(r.get("path", "")),
                 )
@@ -163,6 +178,7 @@ class HybridRetriever:
                             signature=r.get("signature"),
                             docstring=r.get("docstring"),
                             code=r.get("code", "")[:500],
+                            asset_kind=r.get("asset_kind", AssetKind.CODE.value),
                             score=0.7,
                             match_type="keyword",
                             is_test=self._is_test_file(r.get("path", "")),
@@ -199,6 +215,7 @@ class HybridRetriever:
                             signature=r.get("signature"),
                             docstring=r.get("docstring"),
                             code=r.get("code", "")[:500],
+                            asset_kind=r.get("asset_kind", AssetKind.CODE.value),
                             score=0.9,
                             match_type="explicit",
                             is_test=self._is_test_file(r.get("path", "")),
@@ -249,6 +266,32 @@ class HybridRetriever:
 
     def _is_test_file(self, path: str) -> bool:
         return "test" in path.lower()
+
+    def _adjust_semantic_score(
+        self,
+        score: float,
+        asset_kind: str,
+        path: str,
+        issue: ProcessedIssue,
+    ) -> float:
+        if asset_kind == AssetKind.CODE.value:
+            return score
+
+        if self._is_explicitly_mentioned(issue, path):
+            return score * 1.1
+
+        if asset_kind == AssetKind.DOCS.value and issue.issue_type != IssueType.DOCS:
+            return score * 0.65
+
+        if asset_kind in {AssetKind.CONFIG.value, AssetKind.WORKFLOW.value}:
+            if issue.issue_type in {IssueType.DOCS, IssueType.UNKNOWN}:
+                return score * 0.8
+            return score * 0.9
+
+        return score
+
+    def _is_explicitly_mentioned(self, issue: ProcessedIssue, path: str) -> bool:
+        return any(file_ref.path in path or path in file_ref.path for file_ref in issue.mentioned_files)
 
 
 __all__ = [

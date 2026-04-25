@@ -73,6 +73,58 @@ class PreprocessorAndScoringTests(unittest.TestCase):
             any("Start in tests/test_client.py" in suggestion for suggestion in result.suggested_approach)
         )
 
+    def test_heuristic_scorer_formats_non_code_suggestions(self) -> None:
+        scorer = HeuristicScorer()
+        retrieval = RetrievalResult(
+            issue=ProcessedIssue(
+                title="Update CI config for uv",
+                body="The workflow should install uv before tests.",
+                issue_type=IssueType.FEATURE,
+                mentioned_files=[ExtractedFile(path=".github/workflows/ci.yml")],
+                searchable_text="Update CI config .github/workflows/ci.yml uv",
+            ),
+            units=[
+                RetrievedUnit(
+                    id="u1",
+                    path=".github/workflows/ci.yml",
+                    name=".github/workflows/ci.yml",
+                    unit_type="config",
+                    language="text",
+                    start_line=1,
+                    end_line=10,
+                    signature=None,
+                    docstring=None,
+                    code="name: CI\njobs:\n  test:\n",
+                    asset_kind="workflow",
+                    match_type="explicit",
+                ),
+                RetrievedUnit(
+                    id="u2",
+                    path="pyproject.toml",
+                    name="pyproject.toml",
+                    unit_type="config",
+                    language="text",
+                    start_line=1,
+                    end_line=8,
+                    signature=None,
+                    docstring=None,
+                    code="[project]\nname='demo'\n",
+                    asset_kind="config",
+                    match_type="keyword",
+                ),
+            ],
+        )
+
+        result = scorer.score(retrieval)
+
+        self.assertTrue(
+            any("workflow changes" in suggestion for suggestion in result.suggested_approach)
+        )
+        self.assertTrue(
+            any("related configuration" in suggestion for suggestion in result.suggested_approach)
+        )
+        self.assertNotIn("Clear interface", result.positive_signals)
+
 
 if __name__ == "__main__":
     unittest.main()
