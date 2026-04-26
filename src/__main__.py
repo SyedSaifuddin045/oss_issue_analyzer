@@ -2,6 +2,8 @@ from typing import Annotated, Optional
 
 import typer
 from rich.console import Console
+from rich.prompt import Prompt
+from rich.table import Table
 
 __version__ = "1.0.0"
 
@@ -58,6 +60,186 @@ def start(ctx: typer.Context):
 
 
 @app.command()
+def setup(
+    provider: Annotated[
+        Optional[str],
+        typer.Option(
+            "--provider",
+            "-p",
+            help="Provider name (openai, anthropic, google, azure_openai)",
+        ),
+    ] = None,
+    api_key: Annotated[
+        Optional[str],
+        typer.Option(
+            "--api-key",
+            help="API key for the provider",
+        ),
+    ] = None,
+    test: Annotated[
+        bool,
+        typer.Option(
+            "--test",
+            "-t",
+            help="Test the connection after configuration",
+        ),
+    ] = False,
+    list_providers: Annotated[
+        bool,
+        typer.Option(
+            "--list",
+            "-l",
+            help="List available providers based on .env configuration",
+        ),
+    ] = False,
+    clear: Annotated[
+        bool,
+        typer.Option(
+            "--clear",
+            help="Clear saved provider configuration",
+        ),
+    ] = False,
+):
+    from src.analyzer.config import (
+        ProviderName,
+        clear_provider_config,
+        get_available_providers,
+        get_credentials,
+        save_provider_config,
+        test_provider_connection,
+    )
+    from src.analyzer.llm_provider import get_provider_instance
+    
+    if clear:
+        clear_provider_config()
+        console.print("[green]Provider configuration cleared.[/green]")
+        return
+    
+    if list_providers:
+        available = get_available_providers()
+        creds = get_credentials()
+        
+        table = Table(title="Available AI Providers")
+        table.add_column("Provider", style="cyan")
+        table.add_column("Status", style="green")
+        table.add_column("Env Variable", style="yellow")
+        
+        status_for = {
+            ProviderName.OPENAI: ("OpenAI", creds.openai_api_key),
+            ProviderName.ANTHROPIC: ("Anthropic", creds.anthropic_api_key),
+            ProviderName.GOOGLE: ("Google", creds.google_api_key),
+            ProviderName.AZURE_OPENAI: ("Azure OpenAI", creds.azure_openai_api_key),
+        }
+        
+        for prov in [
+            ProviderName.OPENAI,
+            ProviderName.ANTHROPIC,
+            ProviderName.GOOGLE,
+            ProviderName.AZURE_OPENAI,
+        ]:
+            name, key = status_for[prov]
+            status = "✓ Configured" if key else "✗ Not configured"
+            env_var = {
+                ProviderName.OPENAI: "OPENAI_API_KEY",
+                ProviderName.ANTHROPIC: "ANTHROPIC_API_KEY",
+                ProviderName.GOOGLE: "GOOGLE_API_KEY",
+                ProviderName.AZURE_OPENAI: "AZURE_OPENAI_API_KEY",
+            }[prov]
+            table.add_row(name, status, env_var)
+        
+        console.print(table)
+        
+        if available:
+            console.print(f"\n[green]Detected provider(s) in environment:[/green] {', '.join(p.value for p in available)}")
+        
+        return
+    
+    if provider is None:
+        available = get_available_providers()
+        
+        if not available:
+            console.print("[yellow]No API keys detected in environment.[/yellow]")
+            console.print("Please configure one of the following:")
+            console.print("  - OPENAI_API_KEY")
+            console.print("  - ANTHROPIC_API_KEY")
+            console.print("  - GOOGLE_API_KEY")
+            console.print("  - AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT")
+            console.print("\nOr run with --provider to specify one anyway.")
+            
+            provider = Prompt.ask(
+                "Select provider",
+                choices=["openai", "anthropic", "google", "azure_openai"],
+                default="openai",
+            )
+        elif len(available) == 1:
+            provider = available[0].value
+            console.print(f"[cyan]Detected {provider} in environment.[/cyan]")
+        else:
+            console.print(f"[cyan]Multiple providers detected: {', '.join(p.value for p in available)}[/cyan]")
+            provider = Prompt.ask(
+                "Select provider",
+                choices=["openai", "anthropic", "google", "azure_openai"],
+                default=available[0].value,
+            )
+    
+    provider_lower = provider.lower()
+    
+    valid_providers = {
+        "openai": ProviderName.OPENAI,
+        "anthropic": ProviderName.ANTHROPIC,
+        "google": ProviderName.GOOGLE,
+        "azure_openai": ProviderName.AZURE_OPENAI,
+    }
+    
+    if provider_lower not in valid_providers:
+        console.print(f"[red]Invalid provider: {provider}[/red]")
+        console.print("Valid providers: openai, anthropic, google, azure_openai")
+        raise typer.Exit(1)
+    
+    provider_enum = valid_providers[provider_lower]
+    
+    env_key_for_provider = {
+        ProviderName.OPENAI: "OPENAI_API_KEY",
+        ProviderName.ANTHROPIC: "ANTHROPIC_API_KEY",
+        ProviderName.GOOGLE: "GOOGLE_API_KEY",
+        ProviderName.AZURE_OPENAI: "AZURE_OPENAI_API_KEY",
+    }
+    
+    creds = get_credentials()
+    key_is_in_env = {
+        ProviderName.OPENAI: bool(creds.openai_api_key),
+        ProviderName.ANTHROPIC: bool(creds.anthropic_api_key),
+        ProviderName.GOOGLE: bool(creds.google_api_key),
+        ProviderName.AZURE_OPENAI: bool(creds.azure_openai_api_key),
+    }
+    
+    if api_key is None and not key_is_in_env[provider_enum]:
+        api_key = Prompt.ask(
+            f"Enter API key for {provider}",
+            password=True,
+        )
+    
+    if api_key and not key_is_in_env[provider_enum]:
+        console.print(f"[dim]Note: Key will be saved to config (not to .env)[/dim]")
+        save_provider_config(provider_enum)
+    elif key_is_in_env[provider_enum]:
+        save_provider_config(provider_enum)
+        console.print(f"[green]Using {provider} from environment.[/green]")
+    
+    if test:
+        console.print(f"[cyan]Testing {provider} connection...[/cyan]")
+        success, message = test_provider_connection(provider_enum)
+        
+        if success:
+            console.print(f"[green]✓ {message}[/green]")
+        else:
+            console.print(f"[red]✗ {message}[/red]")
+            raise typer.Exit(1)
+    
+    console.print(f"[green]Provider '{provider}' configured successfully![/green]")
+
+
+@app.command()
 def analyze(
     issue_ref: Annotated[str, typer.Argument(help="Issue URL, issue number, or path to local markdown file")],
     repo_path: Annotated[Optional[str], typer.Option("--repo", "-r", help="Path to indexed repository (default: current dir)")] = None,
@@ -65,6 +247,8 @@ def analyze(
     embedder: Annotated[str, typer.Option("--embedder", help="Embedding model (nomic, minilm)")] = "minilm",
     limit: Annotated[int, typer.Option("--limit", "-l", help="Number of code units to retrieve")] = 10,
     gh_repo: Annotated[Optional[str], typer.Option("--gh-repo", help="GitHub repo (owner/repo) - auto-detected if not provided)")] = None,
+    ai_provider: Annotated[Optional[str], typer.Option("--ai-provider", help="AI provider to use (openai, anthropic, google, azure_openai)")] = None,
+    no_ai: Annotated[bool, typer.Option("--no-ai", help="Disable AI scoring, use heuristics only")] = False,
 ):
     from pathlib import Path
     import hashlib
@@ -75,6 +259,9 @@ def analyze(
     from src.analyzer.retriever import HybridRetriever
     from src.analyzer.scorer import HeuristicScorer
     from src.indexer.storage import VectorStore
+    from src.analyzer.config import get_ai_config, ProviderName
+    from src.analyzer.llm_provider import get_provider_instance
+    from src.analyzer.ai_scorer import AIScorer
     from rich.panel import Panel
     
     def get_github_remote(repo_dir: Path) -> tuple[str, str]:
@@ -157,8 +344,44 @@ def analyze(
         retriever = HybridRetriever(db_path=db_path)
         retrieval = retriever.search(processed, repo_id, limit=limit)
         
-        scorer = HeuristicScorer(db_path=db_path)
-        result = scorer.score(retrieval)
+        ai_config = get_ai_config()
+        
+        heuristic_scorer = HeuristicScorer(db_path=db_path)
+        
+        use_ai = not no_ai and ai_config.is_configured
+        
+        if ai_provider:
+            provider_name_map = {
+                "openai": ProviderName.OPENAI,
+                "anthropic": ProviderName.ANTHROPIC,
+                "google": ProviderName.GOOGLE,
+                "azure_openai": ProviderName.AZURE_OPENAI,
+            }
+            provider_enum = provider_name_map.get(ai_provider.lower())
+            if provider_enum:
+                provider = get_provider_instance(provider_enum)
+                if provider:
+                    ai_scorer = AIScorer(provider=provider, fallback_scorer=heuristic_scorer)
+                    result = ai_scorer.score(retrieval)
+                    use_ai = True
+                else:
+                    console.print(f"[yellow]Warning: Could not initialize {ai_provider}, falling back to heuristics[/yellow]")
+                    result = heuristic_scorer.score(retrieval)
+            else:
+                console.print(f"[yellow]Warning: Unknown provider '{ai_provider}', using heuristics[/yellow]")
+                result = heuristic_scorer.score(retrieval)
+        elif use_ai:
+            provider = get_provider_instance(ai_config.provider)
+            if provider:
+                ai_scorer = AIScorer(provider=provider, fallback_scorer=heuristic_scorer)
+                result = ai_scorer.score(retrieval)
+            else:
+                console.print("[yellow]Warning: AI provider not available, using heuristics[/yellow]")
+                result = heuristic_scorer.score(retrieval)
+        else:
+            result = heuristic_scorer.score(retrieval)
+        
+        scoring_method = "AI" if use_ai else "Heuristic"
         
         if global_options.json:
             import json
@@ -168,6 +391,7 @@ def analyze(
                 "confidence": result.overall_difficulty.confidence,
                 "raw_score": result.overall_difficulty.raw_score,
                 "relative_percentile": result.overall_difficulty.relative_percentile,
+                "scoring_method": scoring_method,
                 "units": [
                     {
                         "path": us.unit.path,
@@ -191,8 +415,10 @@ def analyze(
             "hard": "red",
         }.get(result.overall_difficulty.difficulty, "white")
         
+        method_badge = f" [{scoring_method}]" if use_ai else ""
+        
         console.print(Panel(
-            f"[bold]Difficulty:[/bold] [{difficulty_color}]{result.overall_difficulty.difficulty.upper()}[/] (conf: {result.overall_difficulty.confidence:.0%})" + 
+            f"[bold]Difficulty:[/bold] [{difficulty_color}]{result.overall_difficulty.difficulty.upper()}[/] (conf: {result.overall_difficulty.confidence:.0%}){method_badge}" + 
             (f"\n[bold]Relative:[/bold] Easier than {result.overall_difficulty.relative_percentile:.0%}" 
              if result.overall_difficulty.relative_percentile else ""),
             title=f"Issue: {issue.title[:60]}{'...' if len(issue.title) > 60 else ''}",
@@ -220,6 +446,11 @@ def analyze(
         
         if result.is_good_first_issue:
             console.print("\n[bold green]🎯 This issue is suitable as a good first issue![/bold green]")
+        
+        if not use_ai and ai_config.enabled and ai_config.provider != ProviderName.NONE and not no_ai:
+            console.print("\n[dim]Note: AI scoring requested but not available. Used heuristic scoring.[/dim]")
+        elif not use_ai and not no_ai:
+            console.print("\n[dim]Tip: Run 'oss-issue-analyzer setup' to enable AI-powered scoring[/dim]")
         
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
