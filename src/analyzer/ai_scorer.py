@@ -58,6 +58,16 @@ def build_ai_prompt(retrieval: RetrievalResult, heuristic_result: Optional[Scori
     if issue.error_patterns:
         prompt_parts.append(f"Error patterns: {', '.join(issue.error_patterns[:3])}\n")
     
+    if issue.comments:
+        prompt_parts.extend([
+            f"## Issue Discussion & Comments ({len(issue.comments)} comments)",
+            "",
+        ])
+        for i, comment in enumerate(issue.comments):
+            truncated = comment[:600] + "..." if len(comment) > 600 else comment
+            prompt_parts.append(f"- {truncated}")
+        prompt_parts.append("")
+    
     prompt_parts.extend([
         f"## Relevant Code Units Retrieved ({len(retrieval.units)} found)",
         f"",

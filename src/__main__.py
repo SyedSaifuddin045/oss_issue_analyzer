@@ -315,6 +315,7 @@ def analyze(
         
         if Path(issue_ref).exists():
             issue = load_issue_from_file(issue_ref)
+            issue_comments = []
         else:
             owner, repo = gh_repo, None
             if not owner:
@@ -330,8 +331,10 @@ def analyze(
                 if not issue_num:
                     parsed_owner, parsed_repo, parsed_num = client.parse_issue_ref(issue_ref)
                     issue = client.get_issue(parsed_owner, parsed_repo, parsed_num)
+                    issue_comments = client.get_issue_comments(parsed_owner, parsed_repo, parsed_num)
                 else:
                     issue = client.get_issue(owner, repo, issue_num)
+                    issue_comments = client.get_issue_comments(owner, repo, issue_num)
             except ValueError as exc:
                 console.print(f"[bold red]Error:[/bold red] {exc}")
                 raise typer.Exit(1)
@@ -340,6 +343,7 @@ def analyze(
         
         preprocessor = IssuePreprocessor()
         processed = preprocessor.process(issue.title, issue.body)
+        processed.comments = [c.body for c in issue_comments]
         
         retriever = HybridRetriever(db_path=db_path)
         retrieval = retriever.search(processed, repo_id, limit=limit)

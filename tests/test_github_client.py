@@ -3,8 +3,9 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch, MagicMock
 
-from src.github.client import GitHubClient, load_issue_from_file
+from src.github.client import GitHubClient, GitHubIssueComment, load_issue_from_file
 
 
 class GitHubClientTests(unittest.TestCase):
@@ -51,6 +52,33 @@ class GitHubClientTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "must start with a '# ' title heading"):
                 load_issue_from_file(str(issue_file))
+
+    def test_comment_prioritization_sorts_by_reactions(self) -> None:
+        client = GitHubClient()
+        
+        comments = [
+            GitHubIssueComment(id=1, body="Zero reactions", user_login="user1", created_at="", reactions=0),
+            GitHubIssueComment(id=2, body="Ten reactions", user_login="user2", created_at="", reactions=10),
+            GitHubIssueComment(id=3, body="Five reactions", user_login="user3", created_at="", reactions=5),
+        ]
+        
+        prioritized = client._prioritize_comments(comments, limit=7)
+        
+        self.assertEqual(prioritized[0].reactions, 10)
+        self.assertEqual(prioritized[1].reactions, 5)
+        self.assertEqual(prioritized[2].reactions, 0)
+
+    def test_comment_prioritization_respects_limit(self) -> None:
+        client = GitHubClient()
+        
+        comments = [
+            GitHubIssueComment(id=i, body=f"Comment {i}", user_login=f"user{i}", created_at="", reactions=i)
+            for i in range(15)
+        ]
+        
+        prioritized = client._prioritize_comments(comments, limit=5)
+        
+        self.assertEqual(len(prioritized), 5)
 
 
 if __name__ == "__main__":

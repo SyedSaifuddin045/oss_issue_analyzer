@@ -80,6 +80,27 @@ class TestBuildAIPrompt(unittest.TestCase):
         self.assertIn("easy", prompt)
         self.assertIn("Has test files", prompt)
 
+    def test_build_prompt_includes_comments(self):
+        issue = ProcessedIssue(
+            title="Feature request",
+            body="Add new feature",
+            issue_type=IssueType.FEATURE,
+            mentioned_files=[],
+            mentioned_symbols=[],
+            searchable_text="feature",
+            comments=[
+                "Please follow the CONTRIBUTING.md guidelines when submitting PRs",
+                "Great idea! Please also add tests.",
+            ],
+        )
+        
+        retrieval = RetrievalResult(issue=issue, units=[])
+        prompt = build_ai_prompt(retrieval)
+        
+        self.assertIn("Issue Discussion & Comments", prompt)
+        self.assertIn("CONTRIBUTING.md", prompt)
+        self.assertIn("add tests", prompt)
+
 
 class TestParseAIResponse(unittest.TestCase):
     def test_parses_valid_json(self):

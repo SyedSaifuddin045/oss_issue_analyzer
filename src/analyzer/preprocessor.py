@@ -43,6 +43,7 @@ class ProcessedIssue:
     mentioned_symbols: list[ExtractedSymbol] = field(default_factory=list)
     error_patterns: list[ExtractedError] = field(default_factory=list)
     searchable_text: str = ""
+    comments: list[str] = field(default_factory=list)
 
 
 class IssuePreprocessor:

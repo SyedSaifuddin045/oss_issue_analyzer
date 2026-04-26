@@ -29,6 +29,15 @@ class GitHubIssue:
     labels: list[str]
 
 
+@dataclass(slots=True)
+class GitHubIssueComment:
+    id: int
+    body: str
+    user_login: str
+    created_at: str
+    reactions: int
+
+
 class GitHubClient:
     BASE_URL = "https://api.github.com"
 
@@ -139,6 +148,76 @@ class GitHubClient:
             labels=[label["name"] for label in data.get("labels", [])],
         )
 
+    def get_issue_comments(
+        self,
+        owner: str,
+        repo: str,
+        issue_num: int,
+        limit: int = 7,
+    ) -> list[GitHubIssueComment]:
+        """Fetch comments for an issue, sorted by importance."""
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{issue_num}/comments"
+        params: dict[str, str | int] = {"per_page": 100}
+
+        all_comments: list[GitHubIssueComment] = []
+        page = 1
+
+        while True:
+            params["page"] = page
+            response = self.client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+            if not data:
+                break
+
+            for item in data:
+                all_comments.append(self._build_comment(item))
+
+            if len(data) < 100:
+                break
+            page += 1
+
+        return self._prioritize_comments(all_comments, limit)
+
+    def _build_comment(self, data: dict) -> GitHubIssueComment:
+        reactions = 0
+        if "reactions" in data:
+            reactions = data["reactions"].get("total_count", 0)
+        return GitHubIssueComment(
+            id=data["id"],
+            body=data.get("body") or "",
+            user_login=data["user"]["login"],
+            created_at=data["created_at"],
+            reactions=reactions,
+        )
+
+    def _prioritize_comments(
+        self,
+        comments: list[GitHubIssueComment],
+        limit: int,
+    ) -> list[GitHubIssueComment]:
+        """Sort comments by: maintainer first (by repo login), then by reactions."""
+        if not comments:
+            return []
+
+        repo_logins = set()
+        try:
+            user_response = self.client.get(self.BASE_URL)
+            if user_response.status_code == 200:
+                user_response = self.client.get(f"{self.BASE_URL}/user")
+                if user_response.status_code == 200:
+                    repo_logins.add(user_response.json().get("login", ""))
+        except Exception:
+            pass
+
+        def comment_priority(comment: GitHubIssueComment) -> tuple[int, int]:
+            is_maintainer = 1 if comment.user_login in repo_logins else 0
+            return (-is_maintainer, -comment.reactions)
+
+        sorted_comments = sorted(comments, key=comment_priority)
+        return sorted_comments[:limit]
+
 
 def load_issue_from_file(path: str) -> GitHubIssue:
     """Load a local markdown issue file with a leading `# title` heading."""
@@ -178,4 +257,4 @@ def load_issue_from_file(path: str) -> GitHubIssue:
     )
 
 
-__all__ = ["GitHubClient", "GitHubIssue", "load_issue_from_file"]
+__all__ = ["GitHubClient", "GitHubIssue", "GitHubIssueComment", "load_issue_from_file"]
