@@ -82,9 +82,9 @@ def get_ai_config() -> AIConfig:
         try:
             with open(CONFIG_FILE) as f:
                 saved = json.load(f)
-                if saved.get("provider") and saved["provider"] != "none":
-                    provider = ProviderName(saved["provider"])
-                    model = saved.get("model", model)
+            if saved.get("provider") and saved["provider"] != "none":
+                provider = ProviderName(saved["provider"])
+                model = saved.get("model", model)
         except (json.JSONDecodeError, KeyError):
             pass
     
@@ -99,7 +99,7 @@ def get_ai_config() -> AIConfig:
 def get_credentials() -> ProviderCredentials:
     load_dotenv()
     
-    return ProviderCredentials(
+    creds = ProviderCredentials(
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
@@ -110,19 +110,50 @@ def get_credentials() -> ProviderCredentials:
         azure_openai_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
         azure_openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
     )
+    
+    # Also load API keys from config.json if not in environment
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE) as f:
+                saved = json.load(f)
+            
+            if not creds.openai_api_key and saved.get("openai_api_key"):
+                creds.openai_api_key = saved["openai_api_key"]
+            if not creds.anthropic_api_key and saved.get("anthropic_api_key"):
+                creds.anthropic_api_key = saved["anthropic_api_key"]
+            if not creds.google_api_key and saved.get("google_api_key"):
+                creds.google_api_key = saved["google_api_key"]
+            if not creds.azure_openai_api_key and saved.get("azure_openai_api_key"):
+                creds.azure_openai_api_key = saved["azure_openai_api_key"]
+        except (json.JSONDecodeError, KeyError):
+            pass
+    
+    return creds
 
 
-def save_provider_config(provider: ProviderName, model: Optional[str] = None) -> None:
+def save_provider_config(provider: ProviderName, api_key: Optional[str] = None, model: Optional[str] = None) -> None:
     ensure_config_dir()
     config = get_ai_config()
     config.provider = provider
     if model:
         config.model = model
     
+    # Save API key if provided
     save_data = {
         "provider": provider.value if provider != ProviderName.NONE else "none",
-        "model": model,
+        "model": config.model,
     }
+    
+    # Also save the API key if provided
+    if api_key:
+        if provider == ProviderName.OPENAI:
+            save_data["openai_api_key"] = api_key
+        elif provider == ProviderName.ANTHROPIC:
+            save_data["anthropic_api_key"] = api_key
+        elif provider == ProviderName.GOOGLE:
+            save_data["google_api_key"] = api_key
+        elif provider == ProviderName.AZURE_OPENAI:
+            save_data["azure_openai_api_key"] = api_key
     
     with open(CONFIG_FILE, "w") as f:
         json.dump(save_data, f, indent=2)

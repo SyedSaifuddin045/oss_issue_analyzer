@@ -222,7 +222,7 @@ def setup(
     
     if api_key and not key_is_in_env[provider_enum]:
         console.print(f"[dim]Note: Key will be saved to config (not to .env)[/dim]")
-        save_provider_config(provider_enum)
+        save_provider_config(provider_enum, api_key=api_key)
     elif key_is_in_env[provider_enum]:
         save_provider_config(provider_enum)
         console.print(f"[green]Using {provider} from environment.[/green]")
@@ -250,6 +250,7 @@ def analyze(
     gh_repo: Annotated[Optional[str], typer.Option("--gh-repo", help="GitHub repo (owner/repo) - auto-detected if not provided)")] = None,
     ai_provider: Annotated[Optional[str], typer.Option("--ai-provider", help="AI provider to use (openai, anthropic, google, azure_openai)")] = None,
     no_ai: Annotated[bool, typer.Option("--no-ai", help="Disable AI scoring, use heuristics only")] = False,
+    no_cache: Annotated[bool, typer.Option("--no-cache", help="Force re-fetch from GitHub")] = False,
 ):
     from pathlib import Path
     import hashlib
