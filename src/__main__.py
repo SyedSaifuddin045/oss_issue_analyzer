@@ -2,8 +2,9 @@ from typing import Annotated, Optional
 
 import typer
 from rich.console import Console
-from rich.prompt import Prompt
+from rich.prompt import Prompt, Confirm
 from rich.table import Table
+from rich.panel import Panel
 
 __version__ = "1.0.0"
 
@@ -349,43 +350,123 @@ def analyze(
         retrieval = retriever.search(processed, repo_id, limit=limit)
         
         ai_config = get_ai_config()
-        
         heuristic_scorer = HeuristicScorer(db_path=db_path)
         
         use_ai = not no_ai and ai_config.is_configured
+        result = None
+        cache_used = False
         
-        if ai_provider:
-            provider_name_map = {
-                "openai": ProviderName.OPENAI,
-                "anthropic": ProviderName.ANTHROPIC,
-                "google": ProviderName.GOOGLE,
-                "azure_openai": ProviderName.AZURE_OPENAI,
-            }
-            provider_enum = provider_name_map.get(ai_provider.lower())
-            if provider_enum:
-                provider = get_provider_instance(provider_enum)
+        from src.analyzer.cache import (
+            get_cache_dir, load_analysis_cache, save_analysis_cache,
+            update_cached_issue_difficulty,
+        )
+        cache_dir = get_cache_dir(repo_dir)
+        
+        issue_num = None
+        if not Path(issue_ref).exists() and issue_ref.isdigit():
+            issue_num = int(issue_ref)
+        elif "github.com" in issue_ref:
+            try:
+                client_temp = GitHubClient(token=global_options.api_key)
+                try:
+                    parsed = client_temp.parse_issue_ref(issue_ref)
+                    issue_num = parsed[2]
+                finally:
+                    client_temp.close()
+            except Exception:
+                pass
+        
+        if issue_num and not no_cache:
+            cached_analysis = load_analysis_cache(cache_dir, owner, repo, issue_num)
+            if cached_analysis:
+                from src.analyzer.scorer import ScoringResult
+                result = ScoringResult(**cached_analysis["result"])
+                use_ai = False
+                cache_used = True
+                if global_options.verbose:
+                    console.print("[dim][Analysis cached][/dim]")
+        
+        if result is None:
+            if ai_provider:
+                provider_name_map = {
+                    "openai": ProviderName.OPENAI,
+                    "anthropic": ProviderName.ANTHROPIC,
+                    "google": ProviderName.GOOGLE,
+                    "azure_openai": ProviderName.AZURE_OPENAI,
+                }
+                provider_enum = provider_name_map.get(ai_provider.lower())
+                if provider_enum:
+                    provider = get_provider_instance(provider_enum)
+                    if provider:
+                        ai_scorer = AIScorer(provider=provider, fallback_scorer=heuristic_scorer)
+                        result = ai_scorer.score(retrieval)
+                        use_ai = True
+                    else:
+                        console.print(f"[yellow]Warning: Could not initialize {ai_provider}, falling back to heuristics[/yellow]")
+                        result = heuristic_scorer.score(retrieval)
+                else:
+                    console.print(f"[yellow]Warning: Unknown provider '{ai_provider}', using heuristics[/yellow]")
+                    result = heuristic_scorer.score(retrieval)
+            elif use_ai:
+                provider = get_provider_instance(ai_config.provider)
                 if provider:
                     ai_scorer = AIScorer(provider=provider, fallback_scorer=heuristic_scorer)
                     result = ai_scorer.score(retrieval)
-                    use_ai = True
                 else:
-                    console.print(f"[yellow]Warning: Could not initialize {ai_provider}, falling back to heuristics[/yellow]")
+                    console.print("[yellow]Warning: AI provider not available, using heuristics[/yellow]")
                     result = heuristic_scorer.score(retrieval)
             else:
-                console.print(f"[yellow]Warning: Unknown provider '{ai_provider}', using heuristics[/yellow]")
                 result = heuristic_scorer.score(retrieval)
-        elif use_ai:
-            provider = get_provider_instance(ai_config.provider)
-            if provider:
-                ai_scorer = AIScorer(provider=provider, fallback_scorer=heuristic_scorer)
-                result = ai_scorer.score(retrieval)
-            else:
-                console.print("[yellow]Warning: AI provider not available, using heuristics[/yellow]")
-                result = heuristic_scorer.score(retrieval)
-        else:
-            result = heuristic_scorer.score(retrieval)
+            
+            if issue_num:
+                result_dict = {
+                    "issue_title": result.issue_title,
+                    "overall_difficulty": {
+                        "raw_score": result.overall_difficulty.raw_score,
+                        "difficulty": result.overall_difficulty.difficulty,
+                        "confidence": result.overall_difficulty.confidence,
+                        "relative_percentile": result.overall_difficulty.relative_percentile,
+                    },
+                    "units": [
+                        {
+                            "unit": {
+                                "id": us.unit.id,
+                                "path": us.unit.path,
+                                "name": us.unit.name,
+                                "unit_type": us.unit.unit_type,
+                                "language": us.unit.language,
+                                "start_line": us.unit.start_line,
+                                "end_line": us.unit.end_line,
+                                "signature": us.unit.signature,
+                                "docstring": us.unit.docstring,
+                                "code": us.unit.code,
+                                "asset_kind": us.unit.asset_kind,
+                                "score": us.unit.score,
+                                "match_type": us.unit.match_type,
+                                "is_test": us.unit.is_test,
+                            },
+                            "difficulty_score": us.difficulty_score,
+                            "signals": [
+                                {"is_positive": s.is_positive, "message": s.message}
+                                for s in us.signals
+                            ],
+                        }
+                        for us in result.units
+                    ],
+                    "positive_signals": result.positive_signals,
+                    "warning_signals": result.warning_signals,
+                    "suggested_approach": result.suggested_approach,
+                    "is_good_first_issue": result.is_good_first_issue,
+                }
+                save_analysis_cache(
+                    cache_dir, owner, repo, issue_num,
+                    result_dict,
+                    quick_score_original=result.overall_difficulty.raw_score,
+                )
         
         scoring_method = "AI" if use_ai else "Heuristic"
+        if cache_used:
+            scoring_method += " [cached]"
         
         if global_options.json:
             import json
@@ -419,7 +500,7 @@ def analyze(
             "hard": "red",
         }.get(result.overall_difficulty.difficulty, "white")
         
-        method_badge = f" [{scoring_method}]" if use_ai else ""
+        method_badge = f" [{scoring_method}]" if use_ai or cache_used else ""
         
         console.print(Panel(
             f"[bold]Difficulty:[/bold] [{difficulty_color}]{result.overall_difficulty.difficulty.upper()}[/] (conf: {result.overall_difficulty.confidence:.0%}){method_badge}" + 
@@ -453,8 +534,31 @@ def analyze(
         
         if not use_ai and ai_config.enabled and ai_config.provider != ProviderName.NONE and not no_ai:
             console.print("\n[dim]Note: AI scoring requested but not available. Used heuristic scoring.[/dim]")
-        elif not use_ai and not no_ai:
+        elif not use_ai and not no_ai and not cache_used:
             console.print("\n[dim]Tip: Run 'oss-issue-analyzer setup' to enable AI-powered scoring[/dim]")
+        
+        if use_ai and issue_num:
+            quick_score_data = None
+            from src.analyzer.cache import load_issue_cache
+            cached_quick = load_issue_cache(repo_dir, owner, repo, "open")
+            if cached_quick:
+                quick_score_data = next(
+                    (i for i in cached_quick.get("issues", []) if i.get("number") == issue_num),
+                    None
+                )
+            
+            if quick_score_data and quick_score_data.get("difficulty") != result.overall_difficulty.difficulty:
+                console.print(f"\n[yellow]Discrepancy detected![/yellow]")
+                console.print(f"  Quick score: {quick_score_data['difficulty']} (conf: {quick_score_data['confidence']:.0%})")
+                console.print(f"  AI score:    {result.overall_difficulty.difficulty} (conf: {result.overall_difficulty.confidence:.0%})")
+                
+                if Confirm.ask("Update cached quick score to match AI?"):
+                    update_cached_issue_difficulty(
+                        repo_dir, owner, repo, issue_num,
+                        result.overall_difficulty.difficulty,
+                        result.overall_difficulty.raw_score,
+                    )
+                    console.print("[green]Cached quick score updated![/green]")
         
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
@@ -462,6 +566,266 @@ def analyze(
             import traceback
             console.print(traceback.format_exc())
         raise typer.Exit(1)
+
+
+@app.command(name="list-issues")
+def list_issues(
+    repo_path: Annotated[Optional[str], typer.Option("--repo", "-r", help="Path to repository (default: current dir)")] = None,
+    state: Annotated[str, typer.Option("--state", help="Issue state: open, closed, all")] = "open",
+    sort_by: Annotated[str, typer.Option("--sort", help="Sort by: difficulty, number, created")] = "difficulty",
+    filter_difficulty: Annotated[Optional[str], typer.Option("--filter-difficulty", help="Filter by difficulty: easy, medium, hard")] = None,
+    filter_label: Annotated[Optional[str], typer.Option("--filter-label", help="Filter by label (partial match)")] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Max issues to show (0=all)")] = 0,
+    cache_ttl: Annotated[int, typer.Option("--cache-ttl", help="Cache TTL in hours")] = 1,
+    no_cache: Annotated[bool, typer.Option("--no-cache", help="Force re-fetch from GitHub")] = False,
+    workers: Annotated[int, typer.Option("--workers", help="Parallel workers (0=auto)")] = 0,
+    json_output: Annotated[bool, typer.Option("--json", help="Output in JSON format")] = False,
+    interactive: Annotated[bool, typer.Option("--interactive", help="Select and analyze an issue")] = False,
+):
+    """List and analyze issues in a repository (bulk scan with quick scoring)."""
+    from pathlib import Path
+    import hashlib
+    import subprocess
+
+    repo_dir = Path(repo_path or ".").resolve()
+
+    def get_github_remote(repo_dir: Path) -> tuple[str, str]:
+        try:
+            result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            url = result.stdout.strip()
+            if "github.com" in url:
+                if url.startswith("git@github.com:"):
+                    parts = url.replace("git@github.com:", "").replace(".git", "").split("/")
+                else:
+                    parts = url.replace("https://github.com/", "").replace(".git", "").split("/")
+                if len(parts) >= 2:
+                    return parts[0], parts[1]
+        except Exception:
+            pass
+        return None, None
+
+    owner, repo = get_github_remote(repo_dir)
+    if not owner or not repo:
+        console.print("[bold red]Error:[/bold red] Cannot determine GitHub repo. Run in a git repo with remote origin.")
+        raise typer.Exit(1)
+
+    cache_dir = None
+    if not no_cache:
+        from src.analyzer.cache import get_cache_dir, load_issue_cache, save_issue_cache
+        cache_dir = get_cache_dir(repo_dir)
+        cached = load_issue_cache(repo_dir, owner, repo, state, cache_ttl)
+        if cached:
+            issues_data = cached["issues"]
+            if global_options.verbose:
+                console.print(f"[dim]Using cached results from {cached.get('fetched_at', 'unknown')}[/dim]")
+        else:
+            cached = None
+    else:
+        cached = None
+
+    if not cached:
+        from src.github.client import GitHubClient
+        from src.indexer.storage import VectorStore
+
+        if global_options.verbose:
+            console.print(f"[cyan]Fetching issues from {owner}/{repo} (state: {state})...[/cyan]")
+
+        client = GitHubClient(token=global_options.api_key)
+        try:
+            db_path = str(repo_dir / ".oss-index" / "index.lance")
+            vector_store = VectorStore(db_path)
+
+            issues = client.get_issues(owner, repo, state=state)
+
+            if global_options.verbose:
+                console.print(f"[cyan]Processing {len(issues)} issues in parallel...[/cyan]")
+
+            repo_id = hashlib.sha256(str(repo_dir).encode()).hexdigest()[:16]
+            from src.analyzer.bulk_processor import BulkProcessor
+            processor = BulkProcessor(db_path, repo_id, max_workers=workers or None)
+            issues_data = processor.process_issues(issues, limit=limit)
+
+            if cache_dir:
+                save_issue_cache(repo_dir, owner, repo, state, issues_data, cache_ttl)
+        finally:
+            client.close()
+
+    if filter_difficulty:
+        issues_data = [i for i in issues_data if i.get("difficulty") == filter_difficulty]
+    if filter_label:
+        issues_data = [
+            i for i in issues_data
+            if any(filter_label.lower() in l.lower() for l in i.get("labels", []))
+        ]
+
+    if sort_by == "difficulty":
+        issues_data.sort(key=lambda x: (x.get("quick_score", 0.5), x.get("number", 0)))
+    elif sort_by == "number":
+        issues_data.sort(key=lambda x: x.get("number", 0))
+    elif sort_by == "created":
+        issues_data.sort(key=lambda x: x.get("number", 0), reverse=True)
+
+    if json_output:
+        import json
+        console.print(json.dumps(issues_data, indent=2))
+        return
+
+    _display_issues_table(issues_data)
+
+    if interactive:
+        selected = Prompt.ask("\nEnter issue number to analyze (or press Enter to skip)", default="")
+        if selected and selected.isdigit():
+            issue_num = int(selected)
+            console.print(f"\n[bold]Analyzing issue #{issue_num}...[/bold]")
+            # Run analyze logic for this issue
+            from src.github.client import GitHubClient
+            from src.analyzer.preprocessor import IssuePreprocessor
+            from src.analyzer.retriever import HybridRetriever
+            from src.analyzer.scorer import HeuristicScorer
+            from src.indexer.storage import VectorStore
+
+            db_path = str(repo_dir / ".oss-index" / "index.lance")
+            repo_id = hashlib.sha256(str(repo_dir).encode()).hexdigest()[:16]
+
+            client = GitHubClient(token=global_options.api_key)
+            try:
+                issue = client.get_issue(owner, repo, issue_num)
+                comments = client.get_issue_comments(owner, repo, issue_num)
+            finally:
+                client.close()
+
+            preprocessor = IssuePreprocessor()
+            processed = preprocessor.process(issue.title, issue.body)
+            processed.comments = [c.body for c in comments]
+
+            retriever = HybridRetriever(db_path=db_path)
+            retrieval = retriever.search(processed, repo_id, limit=10)
+
+            from src.analyzer.config import get_ai_config, ProviderName
+            from src.analyzer.llm_provider import get_provider_instance
+            from src.analyzer.ai_scorer import AIScorer
+
+            ai_config = get_ai_config()
+            heuristic_scorer = HeuristicScorer(db_path=db_path)
+
+            use_ai = ai_config.is_configured
+            if use_ai:
+                provider = get_provider_instance(ai_config.provider)
+                if provider:
+                    ai_scorer = AIScorer(provider=provider, fallback_scorer=heuristic_scorer)
+                    result = ai_scorer.score(retrieval)
+                else:
+                    result = heuristic_scorer.score(retrieval)
+                    use_ai = False
+            else:
+                result = heuristic_scorer.score(retrieval)
+
+            _display_analysis_result(result, issue, use_ai)
+
+            # Feedback loop: ask to update cached quick score
+            if use_ai and cache_dir:
+                from src.analyzer.cache import load_issue_cache, update_cached_issue_difficulty
+                quick_score = next((i for i in issues_data if i.get("number") == issue_num), None)
+                if quick_score and quick_score.get("difficulty") != result.overall_difficulty.difficulty:
+                    console.print(f"\n[yellow]Discrepancy detected![/yellow]")
+                    console.print(f"  Quick score: {quick_score['difficulty']} (conf: {quick_score['confidence']:.0%})")
+                    console.print(f"  AI score:    {result.overall_difficulty.difficulty} (conf: {result.overall_difficulty.confidence:.0%})")
+                    if Confirm.ask("Update cached quick score to match AI?"):
+                        update_cached_issue_difficulty(
+                            repo_dir, owner, repo, issue_num,
+                            result.overall_difficulty.difficulty,
+                            result.overall_difficulty.raw_score,
+                        )
+                        console.print("[green]Cached quick score updated![/green]")
+
+
+def _display_issues_table(issues_data: list[dict]) -> None:
+    """Display issues in a rich table."""
+    table = Table(title=f"Issues ({len(issues_data)} found)")
+    table.add_column("#", style="cyan", width=6)
+    table.add_column("Title", style="white", no_wrap=False)
+    table.add_column("Difficulty", style="green", width=10)
+    table.add_column("Conf", style="yellow", width=8)
+    table.add_column("Labels", style="blue", no_wrap=False)
+
+    difficulty_colors = {"easy": "green", "medium": "yellow", "hard": "red", "unknown": "white"}
+
+    for issue in issues_data:
+        diff_color = difficulty_colors.get(issue.get("difficulty"), "white")
+        conf = issue.get("confidence", 0.0)
+        conf_str = f"{conf:.0%}"
+        if conf < 0.6:
+            conf_str += " [dim](LOW)[/dim]"
+
+        labels = issue.get("labels", [])
+        labels_str = ", ".join(labels[:3])
+        if len(labels) > 3:
+            labels_str += "..."
+
+        title = issue.get("title", "")
+        if len(title) > 50:
+            title = title[:47] + "..."
+
+        table.add_row(
+            str(issue.get("number", "")),
+            title,
+            f"[{diff_color}]{issue.get('difficulty', 'unknown').upper()}[/]",
+            conf_str,
+            labels_str,
+        )
+
+    console.print(table)
+    console.print("\n[dim]Run 'oss-issue-analyzer analyze <number>' for detailed analysis[/dim]")
+
+
+def _display_analysis_result(result, issue, use_ai: bool) -> None:
+    """Display the analysis result (reused from analyze command)."""
+    from src.analyzer.scorer import DifficultyScore
+    from rich.panel import Panel
+
+    difficulty_color = {
+        "easy": "green",
+        "medium": "yellow",
+        "hard": "red",
+    }.get(result.overall_difficulty.difficulty, "white")
+
+    method_badge = f" [AI]" if use_ai else " [Heuristic]"
+
+    console.print(Panel(
+        f"[bold]Difficulty:[/bold] [{difficulty_color}]{result.overall_difficulty.difficulty.upper()}[/] (conf: {result.overall_difficulty.confidence:.0%}){method_badge}" +
+        (f"\n[bold]Relative:[/bold] Easier than {result.overall_difficulty.relative_percentile:.0%}"
+         if result.overall_difficulty.relative_percentile else ""),
+        title=f"Issue: {issue.title[:60]}{'...' if len(issue.title) > 60 else ''}",
+        border_style=difficulty_color,
+    ))
+
+    console.print("\n[bold]Relevant files:[/bold]")
+    for us in result.units[:5]:
+        console.print(f"  → {us.unit.path}")
+
+    if result.suggested_approach:
+        console.print("\n[bold]Suggested approach:[/bold]")
+        for suggestion in result.suggested_approach:
+            console.print(f"  {suggestion}")
+
+    if result.positive_signals:
+        console.print("\n[green][bold]Contributor signals:[/bold][/green]")
+        for signal in result.positive_signals:
+            console.print(f"  ✓ {signal}")
+
+    if result.warning_signals:
+        console.print("\n[yellow][bold]Warning signals:[/bold][/yellow]")
+        for signal in result.warning_signals:
+            console.print(f"  ⚠ {signal}")
+
+    if result.is_good_first_issue:
+        console.print("\n[bold green]🎯 This issue is suitable as a good first issue![/bold green]")
 
 
 @app.command()

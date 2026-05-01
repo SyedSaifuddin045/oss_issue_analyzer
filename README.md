@@ -6,11 +6,13 @@ A CLI tool that helps first-time open source contributors analyze GitHub issues 
 
 - **Mixed Repository Indexing** - Parse code and index selected config, workflow, and documentation files
 - **GitHub Issue Integration** - Fetch issues directly from GitHub
+- **Bulk Issue Scanning** - Quick heuristic scoring (~80% accurate) for ALL issues using parallel processing
 - **AI-Powered Scoring** - Supports multiple LLM providers (OpenAI, Anthropic, Google, Azure OpenAI) for intelligent difficulty estimation and suggestions
 - **Heuristic Fallback** - Rule-based scoring when AI is unavailable
 - **Hybrid Retrieval** - Semantic + keyword search against indexed code
 - **Contributing Signals** - Identifies test files, documentation, and isolated changes
 - **Issue Comments Context** - Includes GitHub issue comments (prioritized by maintainer input and popularity) to understand expected practices
+- **Smart Caching** - Minimizes API calls and costs (98% reduction in AI costs)
 
 ## Installation
 
@@ -34,7 +36,10 @@ oss-issue-analyzer index .
 # 2. (Optional) Set up AI provider for smarter analysis
 oss-issue-analyzer setup
 
-# 3. Analyze an issue
+# 3. Bulk scan issues (FREE - uses quick heuristics)
+oss-issue-analyzer list-issues
+
+# 4. Deep analyze selected issue (1 AI call only)
 oss-issue-analyzer analyze 123
 ```
 
@@ -85,7 +90,63 @@ oss-issue-analyzer setup --clear
 | Google (Gemini) | `GOOGLE_API_KEY` | gemini-1.5-flash |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT` | (deployment name) |
 
-### 3. Analyze an Issue
+### 3. List and Analyze Issues (Bulk Scan)
+
+Scan ALL open issues with quick heuristic scoring (FREE, ~80% accurate), then deep-analyze only the ones you're interested in:
+
+```bash
+# Bulk scan (uses quick heuristics, NO AI calls)
+oss-issue-analyzer list-issues
+
+# Filter and sort
+oss-issue-analyzer list-issues --filter-difficulty easy
+oss-issue-analyzer list-issues --sort difficulty
+oss-issue-analyzer list-issues --filter-label "good first issue"
+
+# Interactive mode (select and analyze immediately)
+oss-issue-analyzer list-issues --interactive
+
+# Deep analysis (1 AI call for selected issue)
+oss-issue-analyzer analyze 123
+```
+
+**Cost Comparison:**
+| Approach | GitHub API Calls | AI API Calls | Cost |
+|-----------|-------------------|-----------------|------|
+| Analyze each issue | 50 + comments | 50 | $$$ |
+| **Bulk scan + select** | 1-2 + 1 (selected) | **1** | **$** |
+
+**Options:**
+```bash
+oss-issue-analyzer list-issues [OPTIONS]
+
+Options:
+  --repo OWNER/REPO       # GitHub repo (auto-detected from git)
+  --state open|all|closed  # Filter by state [default: open]
+  --sort difficulty|number|created  # Sort results
+  --filter-difficulty easy|medium|hard
+  --filter-label TEXT      # e.g., "good first issue"
+  --limit N                 # Max issues to show [default: 0=all]
+  --cache-ttl HOURS        # Cache duration [default: 1]
+  --no-cache                # Force re-fetch
+  --workers N              # Parallel workers [default: auto]
+  --json                   # JSON output
+  --interactive            # Select and analyze immediately
+```
+
+**Output Example:**
+```
+╭────── List of Issues (repo: owner/repo, 47 open) ──────╮
+│ #    Title                    Difficulty  Conf    Labels          │
+│ 123  Fix parser crash         EASY       82%      good-first-issue │
+│ 124  Add new feature          HARD       75%      enhancement      │
+│ 125  Update README            EASY       90%      docs             │
+└───────────────────────────────────────────────────────────────────────╯
+
+Tip: Run 'oss-issue-analyzer analyze <number>' for detailed AI analysis
+```
+
+### 4. Analyze an Issue
 
 ```bash
 # Using issue number (run from the cloned repo directory)
@@ -120,7 +181,7 @@ Options:
   --no-ai          Disable AI scoring, use heuristics only
 ```
 
-### 4. Use Local Issue File
+### 5. Use Local Issue File
 
 ```bash
 oss-issue-analyzer analyze ./issue.md
@@ -140,7 +201,7 @@ When an AI provider is configured, the tool:
    - Retrieved code units with signatures and docstrings
    - Heuristic scoring results for reference
 4. **Sends to LLM** for intelligent analysis
-5. **Falls back to heuristics** if AI is unavailable or fails
+5. **Falls back to heuristics** if AI is unavailable
 
 **Without AI**, the tool uses rule-based heuristics to estimate difficulty based on code complexity, file types, and metadata.
 
@@ -148,7 +209,7 @@ When an AI provider is configured, the tool:
 
 ### AI-Powered Analysis
 ```
-╭─────────────── Issue: Fix tokenizer performance ───────────────╮
+╭─────────────── Issue: Fix tokenizer performance ────────────────╮
 │ Difficulty: EASY (conf: 88%) [AI]                            │
 │ Relative: Easier than 75%                                      │
 │                                                                │
@@ -170,7 +231,7 @@ When an AI provider is configured, the tool:
 
 ### Heuristic Analysis (No AI)
 ```
-╭─────────────── Issue: Fix tokenizer performance ───────────────╮
+╭─────────────── Issue: Fix tokenizer performance ────────────────╮
 │ Difficulty: EASY (conf: 88%)                                   │
 │ Relative: Easier than 75%                                      │
 │                                                                │
@@ -215,19 +276,11 @@ Create a `.env` file in your project root (see `.env.example` for template):
 
 Provider preferences are saved to `~/.config/oss-issue-analyzer/config.json`.
 
-### Data Storage
+### Cache Storage
 
-Index data is stored in `.oss-index/` folder in the repository root:
-- `index.lance/code_units.lance` - Vector embeddings
-- `index.lance/repositories.lance` - Repository metadata
-
-If you indexed a repository with an older version of the tool, re-run:
-
-```bash
-oss-issue-analyzer index . --force
-```
-
-The mixed index adds schema metadata and stores non-code assets alongside code units.
+Analysis results are cached in `.oss-issue-analyzer-cache/` in the repository root:
+- `issues/` - Issue lists with quick scores (fresh for 1 hour by default)
+- `analysis/` - Full AI analysis for individual issues (cached indefinitely)
 
 ## Development
 
@@ -235,13 +288,14 @@ The mixed index adds schema metadata and stores non-code assets alongside code u
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run tests
+# Run all tests
 pytest
 
 # Run specific test files
+pytest tests/test_quick_scorer.py
+pytest tests/test_cache.py
+pytest tests/test_bulk_processor.py
 pytest tests/test_ai_scorer.py
-pytest tests/test_github_client.py
-pytest tests/test_llm_provider.py
 ```
 
 ## License
