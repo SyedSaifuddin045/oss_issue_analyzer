@@ -377,15 +377,47 @@ def analyze(
             except Exception:
                 pass
         
-        if issue_num and not no_cache:
+        if issue_num and not no_cache and not use_ai:
             cached_analysis = load_analysis_cache(cache_dir, owner, repo, issue_num)
             if cached_analysis:
-                from src.analyzer.scorer import ScoringResult
-                result = ScoringResult(**cached_analysis["result"])
-                use_ai = False
-                cache_used = True
-                if global_options.verbose:
-                    console.print("[dim][Analysis cached][/dim]")
+                try:
+                    from src.analyzer.scorer import ScoringResult, DifficultyScore, UnitScore
+                    from src.analyzer.retriever import RetrievedUnit
+                    
+                    # Reconstruct ScoringResult from cached dict
+                    result_dict = cached_analysis["result"]
+                    overall_difficulty = DifficultyScore(**result_dict["overall_difficulty"])
+                    
+                    units = []
+                    for u in result_dict.get("units", []):
+                        unit_data = u["unit"]
+                        unit = RetrievedUnit(**unit_data)
+                        unit_score = UnitScore(unit=unit, difficulty_score=u["difficulty_score"])
+                        if "signals" in u:
+                            from src.analyzer.scorer import ContributorSignal
+                            unit_score.signals = [ContributorSignal(**s) for s in u["signals"]]
+                        units.append(unit_score)
+                    
+                    result = ScoringResult(
+                        issue_title=result_dict["issue_title"],
+                        overall_difficulty=overall_difficulty,
+                        units=units,
+                        positive_signals=result_dict.get("positive_signals", []),
+                        warning_signals=result_dict.get("warning_signals", []),
+                        suggested_approach=result_dict.get("suggested_approach", []),
+                        is_good_first_issue=result_dict.get("is_good_first_issue", False),
+                        core_problem=result_dict.get("core_problem", ""),
+                        strategic_guidance=result_dict.get("strategic_guidance", []),
+                    )
+                    cache_used = True
+                    if global_options.verbose:
+                        console.print("[dim][Analysis cached][/dim]")
+                except (KeyError, TypeError) as e:
+                    # Cache format mismatch (e.g., old format), ignore cache
+                    if global_options.verbose:
+                        console.print(f"[yellow]Warning: Cache format mismatch, re-analyzing[/yellow]")
+                    result = None
+                    cache_used = False
         
         if result is None:
             if ai_provider:
@@ -458,6 +490,8 @@ def analyze(
                     "warning_signals": result.warning_signals,
                     "suggested_approach": result.suggested_approach,
                     "is_good_first_issue": result.is_good_first_issue,
+                    "core_problem": result.core_problem,
+                    "strategic_guidance": result.strategic_guidance,
                 }
                 save_analysis_cache(
                     cache_dir, owner, repo, issue_num,
@@ -478,6 +512,8 @@ def analyze(
                 "raw_score": result.overall_difficulty.raw_score,
                 "relative_percentile": result.overall_difficulty.relative_percentile,
                 "scoring_method": scoring_method,
+                "core_problem": result.core_problem,
+                "strategic_guidance": result.strategic_guidance,
                 "units": [
                     {
                         "path": us.unit.path,
@@ -515,8 +551,16 @@ def analyze(
         for us in result.units[:5]:
             console.print(f"  → {us.unit.path}")
         
+        if result.core_problem:
+            console.print(f"\n[bold cyan]Core problem:[/bold cyan] {result.core_problem}")
+        
+        if result.strategic_guidance:
+            console.print("\n[bold]Senior guidance:[/bold]")
+            for guidance in result.strategic_guidance:
+                console.print(f"  → {guidance}")
+        
         if result.suggested_approach:
-            console.print("\n[bold]Suggested approach:[/bold]")
+            console.print("\n[bold]Action steps:[/bold]")
             for suggestion in result.suggested_approach:
                 console.print(f"  {suggestion}")
         
@@ -810,8 +854,16 @@ def _display_analysis_result(result, issue, use_ai: bool) -> None:
     for us in result.units[:5]:
         console.print(f"  → {us.unit.path}")
 
+    if result.core_problem:
+        console.print(f"\n[bold cyan]Core problem:[/bold cyan] {result.core_problem}")
+
+    if result.strategic_guidance:
+        console.print("\n[bold]Senior guidance:[/bold]")
+        for guidance in result.strategic_guidance:
+            console.print(f"  → {guidance}")
+
     if result.suggested_approach:
-        console.print("\n[bold]Suggested approach:[/bold]")
+        console.print("\n[bold]Action steps:[/bold]")
         for suggestion in result.suggested_approach:
             console.print(f"  {suggestion}")
 

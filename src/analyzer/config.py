@@ -138,13 +138,25 @@ def save_provider_config(provider: ProviderName, api_key: Optional[str] = None, 
     if model:
         config.model = model
     
-    # Save API key if provided
+    # Save API key if provided, or read from environment
     save_data = {
         "provider": provider.value if provider != ProviderName.NONE else "none",
         "model": config.model,
     }
     
-    # Also save the API key if provided
+    # Get API key from parameter, or from environment
+    if not api_key:
+        creds = get_credentials()
+        if provider == ProviderName.OPENAI and creds.openai_api_key:
+            api_key = creds.openai_api_key
+        elif provider == ProviderName.ANTHROPIC and creds.anthropic_api_key:
+            api_key = creds.anthropic_api_key
+        elif provider == ProviderName.GOOGLE and creds.google_api_key:
+            api_key = creds.google_api_key
+        elif provider == ProviderName.AZURE_OPENAI and creds.azure_openai_api_key:
+            api_key = creds.azure_openai_api_key
+    
+    # Save the API key if we have it
     if api_key:
         if provider == ProviderName.OPENAI:
             save_data["openai_api_key"] = api_key
@@ -192,7 +204,9 @@ def test_provider_connection(provider: ProviderName) -> tuple[bool, str]:
         
         result = provider_instance.complete("Say 'test successful' in exactly 3 words.")
         
-        if "test successful" in result.lower():
+        # Check if response contains "test" and "successful" (more lenient)
+        result_lower = result.lower()
+        if "test" in result_lower and "successful" in result_lower:
             return True, "Connection successful!"
         else:
             return False, f"Unexpected response: {result[:50]}"

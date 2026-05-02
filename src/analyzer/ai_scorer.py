@@ -16,27 +16,40 @@ from src.analyzer.llm_provider import LLMProvider
 from src.analyzer.retriever import RetrievalResult, RetrievedUnit
 
 
-SYSTEM_PROMPT = """You are an expert open source contributor helping analyze GitHub issues for first-time contributors.
+SYSTEM_PROMPT = """You are a senior open source contributor mentoring a newcomer on a GitHub issue.
 
-Your task is to analyze the issue and provide:
-1. A difficulty assessment (easy/medium/hard) with confidence
-2. Suggested approach for solving the issue
-3. Potential pitfalls and warnings
-4. Whether this is a good first issue
+Respond ONLY with valid JSON. Use EXACTLY this structure — no extra fields, no nesting, no alternative names:
 
-Respond in JSON format with the following structure:
 {
-    "difficulty": "easy|medium|hard",
-    "confidence": 0.0-1.0,
-    "reasoning": "brief explanation",
-    "suggested_approach": ["step 1", "step 2", "step 3"],
-    "positive_signals": ["signal 1", "signal 2"],
-    "warning_signals": ["warning 1", "warning 2"],
-    "is_good_first_issue": true|false,
-    "files_to_focus": ["file1", "file2"]
+    "difficulty": "easy",
+    "confidence": 0.8,
+    "core_problem": "One or two sentences explaining the real root cause of this issue.",
+    "strategic_guidance": [
+        "Guidance item 1: what to understand before touching code",
+        "Guidance item 2: what to trace or investigate",
+        "Guidance item 3: where the fix likely lives and why",
+        "Guidance item 4: common pitfalls or edge cases",
+        "Guidance item 5: how to validate the fix"
+    ],
+    "suggested_approach": [
+        "Step 1: investigation",
+        "Step 2: implementation",
+        "Step 3: validation"
+    ],
+    "positive_signals": ["Signal 1", "Signal 2"],
+    "warning_signals": ["Warning 1"],
+    "is_good_first_issue": false,
+    "files_to_focus": ["path/to/file1", "path/to/file2"]
 }
 
-Be concise but helpful. Focus on practical advice for newcomers."""
+CRITICAL RULES:
+- You MUST use the exact field names above. No alternatives. No nested objects.
+- strategic_guidance must be a flat list of 4-7 plain strings. Each string is mentoring advice.
+- suggested_approach must be a flat list of 2-4 plain strings. Each string is one action step.
+- Do NOT use fields like "analysis", "nodes", "steps", "technical_details", "implementation_plan", etc.
+- Do NOT nest data inside objects. Keep everything flat.
+- Write strategic_guidance in a mentoring tone: "Look at how X works before changing Y because...", "Trace the call chain from A to B...", "Be careful about C because..."
+- Confidence should be a number between 0.0 and 1.0."""
 
 
 def build_ai_prompt(retrieval: RetrievalResult, heuristic_result: Optional[ScoringResult] = None) -> str:
@@ -47,7 +60,7 @@ def build_ai_prompt(retrieval: RetrievalResult, heuristic_result: Optional[Scori
         f"",
         f"## Issue Information",
         f"Title: {issue.title}",
-        f"Type: {issue.issue_type}",
+        f"Type: {issue.issue_type.value if hasattr(issue.issue_type, 'value') else issue.issue_type}",
         f"",
     ]
     
@@ -56,7 +69,7 @@ def build_ai_prompt(retrieval: RetrievalResult, heuristic_result: Optional[Scori
         prompt_parts.append(f"Body (truncated):\n{body_snippet}\n")
     
     if issue.error_patterns:
-        prompt_parts.append(f"Error patterns: {', '.join(issue.error_patterns[:3])}\n")
+        prompt_parts.append(f"Error patterns: {', '.join(e.pattern for e in issue.error_patterns[:3])}\n")
     
     if issue.comments:
         prompt_parts.extend([
@@ -133,13 +146,208 @@ def parse_ai_response(response: str) -> dict:
     try:
         parsed = json.loads(json_match.group(0))
         
+        # --- Extract core_problem from any available field ---
+        if not parsed.get("core_problem") or not str(parsed.get("core_problem", "")).strip():
+            for key in ["core_problem", "issue_summary", "problem_statement", "summary"]:
+                val = parsed.get(key)
+                if isinstance(val, str) and len(val.strip()) > 10:
+                    parsed["core_problem"] = val.strip()
+                    break
+            else:
+                analysis = parsed.get("analysis")
+                if isinstance(analysis, str) and len(analysis.strip()) > 10:
+                    parsed["core_problem"] = analysis.strip()
+                elif isinstance(analysis, dict):
+                    for key in ["summary", "problem_statement", "overview", "description"]:
+                        val = analysis.get(key)
+                        if isinstance(val, str) and len(val.strip()) > 10:
+                            parsed["core_problem"] = val.strip()
+                            break
+        
+        core = str(parsed.get("core_problem", "")).strip()
+        
+        # --- Extract strategic_guidance from any available field ---
+        guidance = []
+        existing = parsed.get("strategic_guidance")
+        if isinstance(existing, list) and existing:
+            guidance = existing
+        else:
+            # nodes: per-file insights (these ARE strategic guidance)
+            nodes = parsed.get("nodes")
+            if isinstance(nodes, list):
+                for n in nodes:
+                    if isinstance(n, dict):
+                        desc = n.get("description") or n.get("note") or n.get("rationale")
+                        f = n.get("file") or n.get("path") or ""
+                        if desc:
+                            item = f"In {f}: {desc}" if f else str(desc)
+                            if item.strip() and item.strip() not in core:
+                                guidance.append(item.strip())
+                    elif isinstance(n, str):
+                        if n.strip() and n.strip() not in core:
+                            guidance.append(n.strip())
+            
+            analysis = parsed.get("analysis")
+            if isinstance(analysis, str) and len(analysis.strip()) > 30:
+                # Only add if meaningfully different from core_problem
+                if core and (len(analysis.strip()) > len(core) * 1.5 or core not in analysis):
+                    guidance.append(analysis.strip())
+            elif isinstance(analysis, dict):
+                for key in ["context", "technical_details", "background", "ambiguity_check", "description"]:
+                    val = analysis.get(key)
+                    if isinstance(val, str) and len(val.strip()) > 20 and val.strip() not in core:
+                        guidance.append(val.strip())
+                for key in ["potential_causes", "root_causes", "key_considerations", "risks"]:
+                    val = analysis.get(key)
+                    if isinstance(val, list):
+                        guidance.extend(f"Consider: {v}" for v in val if isinstance(v, str))
+                for key, val in analysis.items():
+                    if key not in ["summary", "problem_statement", "overview", "description", "context", "technical_details", "potential_causes", "root_causes", "key_considerations", "risks", "background", "ambiguity_check"]:
+                        if isinstance(val, str) and len(val.strip()) > 30 and val.strip() not in core:
+                            guidance.append(f"{key}: {val.strip()}")
+                        elif isinstance(val, list):
+                            guidance.extend(f"Note: {v}" for v in val if isinstance(v, str) and len(str(v).strip()) > 20)
+            
+            ta = parsed.get("technical_analysis")
+            if isinstance(ta, dict):
+                for key, val in ta.items():
+                    if isinstance(val, str) and len(val.strip()) > 20 and val.strip() not in core:
+                        guidance.append(val.strip())
+                    elif isinstance(val, list):
+                        guidance.extend(str(v).strip() for v in val if v)
+            
+            vulns = parsed.get("vulnerabilities")
+            if isinstance(vulns, list):
+                for v in vulns:
+                    if isinstance(v, dict):
+                        desc = v.get("description") or v.get("issue") or v.get("problem")
+                        if isinstance(desc, str) and desc.strip():
+                            guidance.append(f"Issue in {v.get('component', 'unknown')}: {desc}")
+                    elif isinstance(v, str):
+                        guidance.append(v)
+            
+            rp = parsed.get("reproduction_plan")
+            if isinstance(rp, dict):
+                steps = rp.get("steps", [])
+                if isinstance(steps, list) and steps:
+                    guidance.append("To reproduce: " + "; ".join(str(s).strip() for s in steps[:3] if s))
+            
+            ip = parsed.get("implementation_plan")
+            if isinstance(ip, dict):
+                steps = ip.get("steps", [])
+                if isinstance(steps, list) and steps:
+                    guidance.append("Implementation path: " + "; ".join(str(s).strip() for s in steps[:3] if s))
+            
+            changes = parsed.get("proposed_changes")
+            if isinstance(changes, list):
+                for c in changes:
+                    if isinstance(c, dict):
+                        instr = c.get("instructions") or c.get("description") or c.get("change")
+                        if isinstance(instr, str) and instr.strip():
+                            guidance.append(f"In {c.get('file', 'unknown')}: {instr}")
+                    elif isinstance(c, str):
+                        guidance.append(c)
+            
+            vp = parsed.get("verification_plan")
+            if isinstance(vp, dict):
+                auto = vp.get("automated_tests", [])
+                manual = vp.get("manual_verification", [])
+                if auto or manual:
+                    items = []
+                    items.extend(str(s).strip() for s in auto[:2] if s)
+                    items.extend(str(s).strip() for s in manual[:2] if s)
+                    if items:
+                        guidance.append("Verify by: " + "; ".join(items))
+            
+            ver_steps = parsed.get("verification_steps")
+            if isinstance(ver_steps, list) and ver_steps:
+                items = []
+                for v in ver_steps[:3]:
+                    if isinstance(v, dict):
+                        desc = v.get("description") or v.get("step") or v.get("action")
+                        if isinstance(desc, str) and desc.strip():
+                            items.append(desc.strip())
+                    elif isinstance(v, str):
+                        items.append(v.strip())
+                if items:
+                    guidance.append("Verify by: " + "; ".join(items))
+        
+        # Deduplicate while preserving order
+        seen = set()
+        unique_guidance = []
+        for g in guidance:
+            key = g[:80]
+            if key not in seen:
+                seen.add(key)
+                unique_guidance.append(g)
+        parsed["strategic_guidance"] = unique_guidance[:7]
+        
+        # --- Extract suggested_approach from any available field ---
+        steps = []
+        existing_steps = parsed.get("suggested_approach")
+        if isinstance(existing_steps, list) and existing_steps:
+            steps = existing_steps
+        else:
+            sb = parsed.get("step_by_step_instructions")
+            if isinstance(sb, list):
+                for item in sb:
+                    if isinstance(item, dict):
+                        desc = item.get("description") or item.get("step") or item.get("action") or ""
+                        if desc:
+                            steps.append(str(desc).strip())
+                    elif isinstance(item, str):
+                        steps.append(item.strip())
+            
+            if not steps:
+                ip = parsed.get("implementation_plan")
+                if isinstance(ip, dict):
+                    ip_steps = ip.get("steps", [])
+                    if isinstance(ip_steps, list):
+                        steps.extend(str(s).strip() for s in ip_steps if s)
+            
+            if not steps:
+                changes = parsed.get("proposed_changes")
+                if isinstance(changes, list):
+                    for c in changes:
+                        if isinstance(c, dict):
+                            instr = c.get("instructions") or c.get("description")
+                            if isinstance(instr, str) and instr.strip():
+                                steps.append(f"In {c.get('file', 'unknown')}: {instr.strip()}")
+                        elif isinstance(c, str):
+                            steps.append(c.strip())
+            
+            if not steps:
+                rp = parsed.get("reproduction_plan")
+                if isinstance(rp, dict):
+                    rp_steps = rp.get("steps", [])
+                    if isinstance(rp_steps, list):
+                        steps.extend("Repro: " + str(s).strip() for s in rp_steps[:2] if s)
+            
+            if not steps:
+                stf = parsed.get("steps_to_fix")
+                if isinstance(stf, list):
+                    steps.extend(str(s).strip() for s in stf if s)
+            
+            if not steps:
+                raw_steps = parsed.get("steps")
+                if isinstance(raw_steps, list):
+                    for s in raw_steps:
+                        if isinstance(s, dict):
+                            desc = s.get("step") or s.get("description") or s.get("action") or ""
+                            details = s.get("details") or ""
+                            combined = f"{desc} — {details}".strip(" —") if details else str(desc).strip()
+                            if combined:
+                                steps.append(combined)
+                        elif isinstance(s, str) and s.strip():
+                            steps.append(s.strip())
+        
+        parsed["suggested_approach"] = steps[:5]
+        
         parsed.setdefault("difficulty", "medium")
         parsed.setdefault("confidence", 0.5)
-        parsed.setdefault("reasoning", "")
-        parsed.setdefault("suggested_approach", [])
+        parsed.setdefault("is_good_first_issue", False)
         parsed.setdefault("positive_signals", [])
         parsed.setdefault("warning_signals", [])
-        parsed.setdefault("is_good_first_issue", False)
         parsed.setdefault("files_to_focus", [])
         
         if parsed["difficulty"] not in ["easy", "medium", "hard"]:
@@ -214,6 +422,9 @@ class AIScorer:
         if not suggested_approach and heuristic_result:
             suggested_approach = heuristic_result.suggested_approach
         
+        core_problem = ai_analysis.get("core_problem", "")
+        strategic_guidance = ai_analysis.get("strategic_guidance", [])
+        
         units = []
         if heuristic_result:
             units = heuristic_result.units
@@ -235,6 +446,8 @@ class AIScorer:
             warning_signals=warning_signals[:5],
             suggested_approach=suggested_approach[:5],
             is_good_first_issue=ai_analysis.get("is_good_first_issue", False),
+            core_problem=core_problem,
+            strategic_guidance=strategic_guidance[:7],
         )
 
 

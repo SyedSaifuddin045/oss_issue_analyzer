@@ -43,6 +43,8 @@ class ScoringResult:
     warning_signals: list[str] = field(default_factory=list)
     suggested_approach: list[str] = field(default_factory=list)
     is_good_first_issue: bool = False
+    core_problem: str = ""
+    strategic_guidance: list[str] = field(default_factory=list)
 
 
 class HeuristicScorer:

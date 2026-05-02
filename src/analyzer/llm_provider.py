@@ -63,7 +63,7 @@ class OpenAIProvider(LLMProvider):
 
 
 class AnthropicProvider(LLMProvider):
-    def __init__(self, api_key: Optional[str] = None, model: str = "claude-3-haiku-20240307"):
+    def __init__(self, api_key: Optional[str] = None, model: str = "claude-3-5-haiku-20241022"):
         import anthropic
         
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
@@ -90,25 +90,29 @@ class AnthropicProvider(LLMProvider):
 
 
 class GoogleProvider(LLMProvider):
-    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-1.5-flash"):
-        import google.generativeai as genai
+    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-flash-latest"):
+        try:
+            from google import genai
+        except ImportError:
+            raise ImportError("Please install google-genai: pip install google-genai")
         
-        self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
-        if not self.api_key:
+        # Get API key from parameter, or from credentials (which reads config.json)
+        if not api_key:
+            from src.analyzer.config import get_credentials
+            creds = get_credentials()
+            api_key = creds.google_api_key
+        
+        if not api_key:
             raise ValueError("Google API key not provided")
         
-        genai.configure(api_key=self.api_key)
+        self.api_key = api_key
         self.model_name = model
-        self.model = genai.GenerativeModel(model)
+        self.client = genai.Client(api_key=self.api_key)
 
     def complete(self, prompt: str, **kwargs) -> str:
-        generation_config = {
-            "temperature": 0.7,
-            **kwargs
-        }
-        response = self.model.generate_content(
-            prompt,
-            generation_config=generation_config
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=prompt,
         )
         return response.text
 
