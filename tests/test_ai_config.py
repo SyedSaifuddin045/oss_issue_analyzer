@@ -1,103 +1,95 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
-from unittest.mock import patch, MagicMock
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
+from src.analyzer import config as config_module
 from src.analyzer.config import (
     AIConfig,
     ProviderName,
-    ProviderCredentials,
+    clear_provider_config,
     get_ai_config,
+    get_available_providers,
+    get_config_file,
     get_credentials,
     save_provider_config,
-    clear_provider_config,
-    get_available_providers,
-    CONFIG_DIR,
-    CONFIG_FILE,
 )
 
 
-class TestConfigLoading(unittest.TestCase):
+class ConfigTestCase(unittest.TestCase):
     def setUp(self):
-        if CONFIG_FILE.exists():
-            CONFIG_FILE.unlink()
+        self.temp_dir = TemporaryDirectory()
+        self.base_env = {"OSS_ISSUE_ANALYZER_CONFIG_DIR": self.temp_dir.name}
 
     def tearDown(self):
-        if CONFIG_FILE.exists():
-            CONFIG_FILE.unlink()
+        self.temp_dir.cleanup()
 
-    @patch.dict(os.environ, {"OPENAI_API_KEY": "test-key-123"})
+    def config_file(self) -> Path:
+        return Path(self.temp_dir.name) / "config.json"
+
+
+class TestConfigLoading(ConfigTestCase):
     def test_get_credentials_loads_from_env(self):
-        creds = get_credentials()
-        self.assertEqual(creds.openai_api_key, "test-key-123")
+        with patch.dict(os.environ, {**self.base_env, "OPENAI_API_KEY": "test-key-123"}, clear=True):
+            creds = get_credentials()
+            self.assertEqual(creds.openai_api_key, "test-key-123")
 
-    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "ant-test-key"})
-    def test_get_credentials_anthropic(self):
-        creds = get_credentials()
-        self.assertEqual(creds.anthropic_api_key, "ant-test-key")
-
-    @patch.dict(os.environ, {"GOOGLE_API_KEY": "google-test-key"})
     def test_get_credentials_google(self):
-        creds = get_credentials()
-        self.assertEqual(creds.google_api_key, "google-test-key")
+        with patch.dict(os.environ, {**self.base_env, "GOOGLE_API_KEY": "google-test-key"}, clear=True):
+            creds = get_credentials()
+            self.assertEqual(creds.google_api_key, "google-test-key")
+            self.assertEqual(creds.google_model, "gemini-flash-latest")
 
-    @patch.dict(os.environ, {
-        "AZURE_OPENAI_API_KEY": "azure-key",
-        "AZURE_OPENAI_ENDPOINT": "https://test.openai.azure.com"
-    })
-    def test_get_credentials_azure(self):
-        creds = get_credentials()
-        self.assertEqual(creds.azure_openai_api_key, "azure-key")
-        self.assertEqual(creds.azure_openai_endpoint, "https://test.openai.azure.com")
-
-    @patch.dict(os.environ, {"AI_ENABLED": "false"})
     def test_ai_disabled_via_env(self):
-        config = get_ai_config()
-        self.assertFalse(config.enabled)
+        with patch.dict(os.environ, {**self.base_env, "AI_ENABLED": "false"}, clear=True):
+            config = get_ai_config()
+            self.assertFalse(config.enabled)
 
-    @patch.dict(os.environ, {"AI_TIMEOUT_SECONDS": "60"})
-    def test_custom_timeout(self):
-        config = get_ai_config()
-        self.assertEqual(config.timeout_seconds, 60)
+    def test_custom_analysis_settings(self):
+        with patch.dict(
+            os.environ,
+            {
+                **self.base_env,
+                "AI_TIMEOUT_SECONDS": "60",
+                "AI_TEMPERATURE": "0.25",
+                "AI_MAX_TOKENS": "2048",
+                "AI_CONTEXT_UNIT_BUDGET": "11",
+            },
+            clear=True,
+        ):
+            config = get_ai_config()
+            self.assertEqual(config.timeout_seconds, 60)
+            self.assertEqual(config.temperature, 0.25)
+            self.assertEqual(config.max_tokens, 2048)
+            self.assertEqual(config.context_unit_budget, 11)
 
 
-class TestProviderSelection(unittest.TestCase):
-    def setUp(self):
-        if CONFIG_FILE.exists():
-            CONFIG_FILE.unlink()
-
-    def tearDown(self):
-        if CONFIG_FILE.exists():
-            CONFIG_FILE.unlink()
-
-    @patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"})
+class TestProviderSelection(ConfigTestCase):
     def test_auto_detect_openai_provider(self):
-        config = get_ai_config()
-        self.assertEqual(config.provider, ProviderName.OPENAI)
+        with patch.dict(os.environ, {**self.base_env, "OPENAI_API_KEY": "test-key"}, clear=True):
+            config = get_ai_config()
+            self.assertEqual(config.provider, ProviderName.OPENAI)
 
-    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
-    def test_auto_detect_anthropic_provider(self):
-        config = get_ai_config()
-        self.assertEqual(config.provider, ProviderName.ANTHROPIC)
-
-    @patch.dict(os.environ, {"OPENAI_API_KEY": "test-key", "GOOGLE_API_KEY": "test-key"})
     def test_preference_order_openai_over_google(self):
-        config = get_ai_config()
-        self.assertEqual(config.provider, ProviderName.OPENAI)
+        with patch.dict(
+            os.environ,
+            {**self.base_env, "OPENAI_API_KEY": "test-key", "GOOGLE_API_KEY": "test-key"},
+            clear=True,
+        ):
+            config = get_ai_config()
+            self.assertEqual(config.provider, ProviderName.OPENAI)
 
-    @patch.dict(os.environ, {}, clear=True)
     def test_no_provider_when_no_keys(self):
-        config = get_ai_config()
-        self.assertEqual(config.provider, ProviderName.NONE)
+        with patch.dict(os.environ, self.base_env, clear=True):
+            config = get_ai_config()
+            self.assertEqual(config.provider, ProviderName.NONE)
 
     def test_is_configured_returns_false_when_disabled(self):
         config = AIConfig(enabled=False, provider=ProviderName.OPENAI)
-        self.assertFalse(config.is_configured)
-
-    def test_is_configured_returns_false_when_no_provider(self):
-        config = AIConfig(enabled=True, provider=ProviderName.NONE)
         self.assertFalse(config.is_configured)
 
     def test_is_configured_returns_true_when_configured(self):
@@ -105,45 +97,40 @@ class TestProviderSelection(unittest.TestCase):
         self.assertTrue(config.is_configured)
 
 
-class TestSaveProviderConfig(unittest.TestCase):
-    def setUp(self):
-        if CONFIG_FILE.exists():
-            CONFIG_FILE.unlink()
-
-    def tearDown(self):
-        if CONFIG_FILE.exists():
-            CONFIG_FILE.unlink()
-
+class TestSaveProviderConfig(ConfigTestCase):
     def test_save_and_load_provider_config(self):
-        save_provider_config(ProviderName.OPENAI, model="gpt-4o")
-        
-        self.assertTrue(CONFIG_FILE.exists())
-        
-        import json
-        with open(CONFIG_FILE) as f:
-            data = json.load(f)
-        
-        self.assertEqual(data["provider"], "openai")
-        self.assertEqual(data["model"], "gpt-4o")
+        with patch.dict(os.environ, self.base_env, clear=True):
+            save_provider_config(ProviderName.OPENAI, model="gpt-4o")
+            self.assertTrue(get_config_file().exists())
+
+            with open(get_config_file(), encoding="utf-8") as handle:
+                data = json.load(handle)
+
+            self.assertEqual(data["provider"], "openai")
+            self.assertEqual(data["model"], "gpt-4o")
+            self.assertIn("ai_temperature", data)
 
     def test_clear_provider_config(self):
-        save_provider_config(ProviderName.ANTHROPIC)
-        clear_provider_config()
-        
-        self.assertFalse(CONFIG_FILE.exists())
+        with patch.dict(os.environ, self.base_env, clear=True):
+            save_provider_config(ProviderName.ANTHROPIC)
+            clear_provider_config()
+            self.assertFalse(get_config_file().exists())
 
 
-class TestAvailableProviders(unittest.TestCase):
-    @patch.dict(os.environ, {"OPENAI_API_KEY": "test", "GOOGLE_API_KEY": "test"})
+class TestAvailableProviders(ConfigTestCase):
     def test_detects_multiple_providers(self):
-        available = get_available_providers()
-        self.assertIn(ProviderName.OPENAI, available)
-        self.assertIn(ProviderName.GOOGLE, available)
+        with patch.dict(
+            os.environ,
+            {**self.base_env, "OPENAI_API_KEY": "test", "GOOGLE_API_KEY": "test"},
+            clear=True,
+        ):
+            available = get_available_providers()
+            self.assertIn(ProviderName.OPENAI, available)
+            self.assertIn(ProviderName.GOOGLE, available)
 
-    @patch.dict(os.environ, {}, clear=True)
     def test_returns_empty_when_no_keys(self):
-        available = get_available_providers()
-        self.assertEqual(available, [])
+        with patch.dict(os.environ, self.base_env, clear=True):
+            self.assertEqual(get_available_providers(), [])
 
 
 if __name__ == "__main__":

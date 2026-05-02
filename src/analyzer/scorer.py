@@ -1,8 +1,10 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+from src.analyzer.preprocessor import IssueType
 from src.analyzer.retriever import RetrievedUnit, RetrievalResult
 from src.indexer.parser import AssetKind
 
@@ -45,6 +47,8 @@ class ScoringResult:
     is_good_first_issue: bool = False
     core_problem: str = ""
     strategic_guidance: list[str] = field(default_factory=list)
+    why_these_files: list[str] = field(default_factory=list)
+    uncertainty_notes: list[str] = field(default_factory=list)
 
 
 class HeuristicScorer:
@@ -54,18 +58,14 @@ class HeuristicScorer:
 
     def score(self, retrieval: RetrievalResult) -> ScoringResult:
         unit_scores = self._score_units(retrieval.units)
-        
-        self._all_scores = [us.difficulty_score for us in unit_scores]
-        
+        self._all_scores = [unit_score.difficulty_score for unit_score in unit_scores]
+
         overall = self._compute_overall_score(unit_scores)
-        
         positive_signals, warning_signals = self._extract_signals(unit_scores, retrieval)
-        
         suggested = self._generate_suggestions(unit_scores, retrieval)
-        
-        is_good_first = self._assess_good_first(
-            overall, positive_signals, warning_signals
-        )
+        why_these_files = self._explain_file_focus(unit_scores)
+        uncertainty_notes = self._build_uncertainty_notes(retrieval)
+        is_good_first = self._assess_good_first(overall, positive_signals, warning_signals)
 
         return ScoringResult(
             issue_title=retrieval.issue.title,
@@ -75,25 +75,16 @@ class HeuristicScorer:
             warning_signals=warning_signals,
             suggested_approach=suggested,
             is_good_first_issue=is_good_first,
+            why_these_files=why_these_files,
+            uncertainty_notes=uncertainty_notes,
         )
 
-    def _score_units(
-        self, units: list[RetrievedUnit]
-    ) -> list[UnitScore]:
+    def _score_units(self, units: list[RetrievedUnit]) -> list[UnitScore]:
         scored = []
-        
         for unit in units:
             score = self._compute_unit_score(unit)
             signals = self._extract_unit_signals(unit, score)
-            
-            scored.append(
-                UnitScore(
-                    unit=unit,
-                    difficulty_score=score,
-                    signals=signals,
-                )
-            )
-
+            scored.append(UnitScore(unit=unit, difficulty_score=score, signals=signals))
         return scored
 
     def _compute_unit_score(self, unit: RetrievedUnit) -> float:
@@ -101,31 +92,26 @@ class HeuristicScorer:
             return self._compute_non_code_score(unit)
 
         score = 0.0
-        
         if unit.unit_type == "function":
             score += 0.1
         elif unit.unit_type == "method":
             score += 0.15
         elif unit.unit_type == "class":
             score += 0.2
-        
+
         loc = unit.code.count("\n")
         score += min(loc / 500, 0.3)
-        
         if unit.is_test:
             score *= 0.7
-        
         if unit.docstring:
             score *= 0.9
-        
         if unit.signature and "(" in unit.signature:
             score *= 0.95
-        
+
         return min(score, 1.0)
 
     def _compute_non_code_score(self, unit: RetrievedUnit) -> float:
         loc = unit.code.count("\n")
-
         if unit.asset_kind == AssetKind.DOCS.value:
             score = 0.12
         elif unit.asset_kind == AssetKind.WORKFLOW.value:
@@ -141,94 +127,40 @@ class HeuristicScorer:
         score += min(loc / 800, 0.18)
         return min(max(score, 0.05), 1.0)
 
-    def _extract_unit_signals(
-        self, unit: RetrievedUnit, score: float
-    ) -> list[ContributorSignal]:
+    def _extract_unit_signals(self, unit: RetrievedUnit, score: float) -> list[ContributorSignal]:
         signals = []
-
         if unit.asset_kind != AssetKind.CODE.value:
             if unit.asset_kind == AssetKind.DOCS.value:
-                signals.append(
-                    ContributorSignal(
-                        is_positive=True,
-                        message="Documentation change is easier to validate"
-                    )
-                )
+                signals.append(ContributorSignal(True, "Documentation change is easier to validate"))
             elif unit.asset_kind == AssetKind.WORKFLOW.value:
-                signals.append(
-                    ContributorSignal(
-                        is_positive=False,
-                        message="CI workflow changes can affect automation"
-                    )
-                )
+                signals.append(ContributorSignal(False, "CI workflow changes can affect automation"))
             else:
-                signals.append(
-                    ContributorSignal(
-                        is_positive=True,
-                        message="Configuration scope is usually file-local"
-                    )
-                )
+                signals.append(ContributorSignal(True, "Configuration scope is usually file-local"))
             return signals
-        
-        if unit.is_test:
-            signals.append(
-                ContributorSignal(
-                    is_positive=True,
-                    message=f"Test file - changes are verifiable"
-                )
-            )
-        
-        if unit.docstring:
-            signals.append(
-                ContributorSignal(
-                    is_positive=True,
-                    message="Has documentation"
-                )
-            )
-        
-        if unit.signature and len(unit.signature) < 100:
-            signals.append(
-                ContributorSignal(
-                    is_positive=True,
-                    message="Clear interface"
-                )
-            )
-        
-        if unit.unit_type == "function" and score < 0.3:
-            signals.append(
-                ContributorSignal(
-                    is_positive=True,
-                    message="Isolated change possible"
-                )
-            )
-        
-        if unit.unit_type == "class" and score > 0.5:
-            signals.append(
-                ContributorSignal(
-                    is_positive=False,
-                    message="May require class-level changes"
-                )
-            )
 
+        if unit.is_test:
+            signals.append(ContributorSignal(True, "Test file - changes are verifiable"))
+        if unit.docstring:
+            signals.append(ContributorSignal(True, "Has documentation"))
+        if unit.signature and len(unit.signature) < 100:
+            signals.append(ContributorSignal(True, "Clear interface"))
+        if unit.match_reasons:
+            signals.append(ContributorSignal(True, f"Matched because: {', '.join(unit.match_reasons[:2])}"))
+        if unit.unit_type == "function" and score < 0.3:
+            signals.append(ContributorSignal(True, "Isolated change possible"))
+        if unit.unit_type == "class" and score > 0.5:
+            signals.append(ContributorSignal(False, "May require class-level changes"))
         return signals
 
-    def _compute_overall_score(
-        self, unit_scores: list[UnitScore]
-    ) -> DifficultyScore:
+    def _compute_overall_score(self, unit_scores: list[UnitScore]) -> DifficultyScore:
         if not unit_scores:
-            return DifficultyScore(
-                raw_score=0.0,
-                difficulty="unknown",
-                confidence=0.0
-            )
+            return DifficultyScore(raw_score=0.0, difficulty="unknown", confidence=0.0)
 
-        scores = [us.difficulty_score for us in unit_scores]
-        
+        scores = [unit_score.difficulty_score for unit_score in unit_scores]
         avg_score = sum(scores) / len(scores)
         max_score = max(scores)
-        
         raw_score = (avg_score * 0.4) + (max_score * 0.6)
-        
+
         if raw_score <= 0.35:
             difficulty = "easy"
             confidence = 0.9 - raw_score
@@ -241,7 +173,7 @@ class HeuristicScorer:
 
         percentile = None
         if self._all_scores:
-            below = sum(1 for s in self._all_scores if s < raw_score)
+            below = sum(1 for score in self._all_scores if score < raw_score)
             percentile = below / len(self._all_scores) if self._all_scores else 0.0
 
         return DifficultyScore(
@@ -256,107 +188,102 @@ class HeuristicScorer:
         unit_scores: list[UnitScore],
         retrieval: RetrievalResult,
     ) -> tuple[list[str], list[str]]:
-        positive = []
-        warnings = []
-        
         all_signals = []
-        for us in unit_scores:
-            all_signals.extend(us.signals)
+        for unit_score in unit_scores:
+            all_signals.extend(unit_score.signals)
 
-        positive_msgs = [s.message for s in all_signals if s.is_positive]
-        warning_msgs = [s.message for s in all_signals if not s.is_positive]
+        positive = list(dict.fromkeys(signal.message for signal in all_signals if signal.is_positive))
+        warnings = list(dict.fromkeys(signal.message for signal in all_signals if not signal.is_positive))
 
-        unique_positive = list(dict.fromkeys(positive_msgs))
-        unique_warning = list(dict.fromkeys(warning_msgs))
-
-        if retrieval.issue.issue_type == "bug":
-            unique_positive.append("Bug report with clear scope")
-        
+        if retrieval.issue.issue_type == IssueType.BUG:
+            positive.insert(0, "Bug report with clear scope")
         if retrieval.issue.error_patterns:
-            unique_warning.append("Error trace provides debugging hints")
+            positive.insert(1, "Stack trace provides concrete debugging clues")
+        if not retrieval.issue.mentioned_files:
+            warnings.append("Issue does not mention a concrete file path")
+        if len(retrieval.units) < 2:
+            warnings.append("Limited retrieval context may hide related call sites")
 
-        return unique_positive[:5], unique_warning[:5]
+        return list(dict.fromkeys(positive))[:5], warnings[:5]
 
     def _generate_suggestions(
         self,
         unit_scores: list[UnitScore],
         retrieval: RetrievalResult,
     ) -> list[str]:
-        suggestions = []
-        
         if not unit_scores:
             return ["No relevant code found in index"]
 
-        sorted_units = sorted(
-            unit_scores,
-            key=lambda x: x.difficulty_score
-        )
-
-        for i, us in enumerate(sorted_units[:3]):
-            if us.unit.asset_kind == AssetKind.DOCS.value:
-                suggestions.append(f"{i+1}. Start in {us.unit.path}")
-            elif us.unit.asset_kind == AssetKind.WORKFLOW.value:
-                suggestions.append(f"{i+1}. Check {us.unit.path} for related workflow changes")
-            elif us.unit.asset_kind == AssetKind.CONFIG.value:
-                suggestions.append(f"{i+1}. Check {us.unit.path} for related configuration")
-            elif us.unit.name and us.unit.name != us.unit.path:
-                suggestions.append(f"{i+1}. Start in {us.unit.path} -> {us.unit.name}")
+        suggestions = []
+        ranked = sorted(unit_scores, key=lambda item: item.difficulty_score)
+        for index, unit_score in enumerate(ranked[:3]):
+            unit = unit_score.unit
+            if unit.asset_kind == AssetKind.DOCS.value:
+                suggestions.append(f"{index + 1}. Start in {unit.path}")
+            elif unit.asset_kind == AssetKind.WORKFLOW.value:
+                suggestions.append(f"{index + 1}. Check {unit.path} for related workflow changes")
+            elif unit.asset_kind == AssetKind.CONFIG.value:
+                suggestions.append(f"{index + 1}. Check {unit.path} for related configuration")
+            elif unit.name and unit.name != unit.path:
+                suggestions.append(f"{index + 1}. Start in {unit.path} -> {unit.name}")
             else:
-                suggestions.append(f"{i+1}. Start in {us.unit.path}")
+                suggestions.append(f"{index + 1}. Start in {unit.path}")
 
-        if retrieval.issue.issue_type == "bug":
-            files = list(
-                {
-                    u.unit.path
-                    for u in sorted_units[:3]
-                    if u.unit.path and u.unit.asset_kind == AssetKind.CODE.value
-                }
-            )
+        if retrieval.issue.issue_type == IssueType.BUG:
+            files = [item.unit.path for item in ranked[:3] if item.unit.asset_kind == AssetKind.CODE.value]
             if files:
                 test_hints = self._find_test_files(files[0])
                 if test_hints:
                     suggestions.append(f"Test: {test_hints}")
 
-        return suggestions
+        if retrieval.issue.stack_traces:
+            suggestions.append("Validate the fix against the reported stack trace or reproduction path")
 
-    def _find_test_files(self, file_path: str) -> str:
-        import os
-        path = file_path
-        
-        if "/test_" in path or path.endswith("test.py"):
-            return path
-        
-        parts = path.rsplit("/", 1)
-        if len(parts) == 2:
-            directory, filename = parts
-            test_name = f"{directory}/test_{filename}"
-            if os.path.exists(test_name):
-                return test_name
-        
-        return f"Check test_{file_path}"
+        return suggestions[:5]
 
     def _assess_good_first(
         self,
         overall: DifficultyScore,
-        positive: list[str],
-        warnings: list[str],
+        positive_signals: list[str],
+        warning_signals: list[str],
     ) -> bool:
-        if overall.difficulty != "easy":
-            return False
-        
-        if "Isolated change possible" not in positive:
-            return False
-        
-        if len(warnings) > 2:
-            return False
+        return (
+            overall.difficulty == DifficultyLabel.EASY.value
+            and len(warning_signals) <= 2
+            and any("verifiable" in signal.lower() or "isolated" in signal.lower() for signal in positive_signals)
+        )
 
-        return True
+    def _find_test_files(self, path: str) -> str | None:
+        filename = path.rsplit("/", 1)[-1]
+        if filename.endswith(".py"):
+            return f"pytest tests/test_{filename[:-3]}.py"
+        return None
+
+    def _explain_file_focus(self, unit_scores: list[UnitScore]) -> list[str]:
+        explanations = []
+        for unit_score in unit_scores[:3]:
+            unit = unit_score.unit
+            reasons = unit.match_reasons[:2] or ["high retrieval score"]
+            label = unit.name if unit.name and unit.name != unit.path else unit.path
+            explanations.append(f"{label} is relevant because of {', '.join(reasons)}")
+        return explanations
+
+    def _build_uncertainty_notes(self, retrieval: RetrievalResult) -> list[str]:
+        notes = []
+        if not retrieval.issue.mentioned_files:
+            notes.append("The issue does not name a specific file, so file focus is inferred from retrieval.")
+        if len(retrieval.units) < 2:
+            notes.append("Only a small amount of relevant code was retrieved from the index.")
+        if retrieval.issue.issue_type == IssueType.UNKNOWN:
+            notes.append("The issue type is ambiguous, so difficulty may shift after reproducing the bug.")
+        return notes[:3]
 
 
 __all__ = [
-    "HeuristicScorer",
+    "DifficultyLabel",
     "DifficultyScore",
     "ContributorSignal",
     "UnitScore",
     "ScoringResult",
+    "HeuristicScorer",
 ]

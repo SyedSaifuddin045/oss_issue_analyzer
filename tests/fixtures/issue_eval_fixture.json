@@ -1,0 +1,80 @@
+{
+  "issue": {
+    "title": "Fix plain issue number parsing",
+    "body": "Parsing issue references fails for `42` when running from a repository context.",
+    "issue_type": "bug",
+    "mentioned_files": ["src/github/client.py"],
+    "searchable_text": "Fix plain issue number parsing parse_issue_ref src/github/client.py",
+    "comments": [
+      {
+        "body": "Please add a regression test for the number-only case.",
+        "author": "maintainer",
+        "is_maintainer": true,
+        "reactions": 5
+      }
+    ],
+    "code_blocks": ["assert parse_issue_ref('42', 'owner/repo') == ('owner', 'repo', 42)"],
+    "stack_traces": ["File \"src/github/client.py\", line 42, in parse_issue_ref"]
+  },
+  "retrieval_units": [
+    {
+      "id": "u1",
+      "path": "src/github/client.py",
+      "name": "parse_issue_ref",
+      "unit_type": "function",
+      "language": "python",
+      "start_line": 1,
+      "end_line": 25,
+      "signature": "def parse_issue_ref(ref, repo_hint=None):",
+      "docstring": "Parse issue references into owner, repo, and number.",
+      "code": "def parse_issue_ref(ref, repo_hint=None):\n    return ref\n",
+      "asset_kind": "code",
+      "score": 0.92,
+      "match_type": "explicit",
+      "is_test": false,
+      "match_reasons": ["explicit file mention", "exact symbol mention"]
+    },
+    {
+      "id": "u2",
+      "path": "tests/test_client.py",
+      "name": "test_parse_issue_ref",
+      "unit_type": "function",
+      "language": "python",
+      "start_line": 1,
+      "end_line": 15,
+      "signature": "def test_parse_issue_ref():",
+      "docstring": "Regression coverage for issue reference parsing.",
+      "code": "def test_parse_issue_ref():\n    assert True\n",
+      "asset_kind": "code",
+      "score": 0.78,
+      "match_type": "semantic",
+      "is_test": true,
+      "match_reasons": ["nearby test coverage"]
+    }
+  ],
+  "expected_response": {
+    "difficulty": "easy",
+    "confidence": 0.86,
+    "core_problem": "The parser handles URL and owner/repo references but misses the plain-number case when repo context is available.",
+    "strategic_guidance": [
+      "Reproduce the number-only parsing path before editing the parser.",
+      "Trace how repo_hint is used when the ref is just a number.",
+      "Compare the plain-number branch to the existing URL and owner/repo#num branches.",
+      "Keep the accepted existing formats intact while adding the new case."
+    ],
+    "suggested_approach": [
+      "Add a failing regression test for a plain issue number with repo context.",
+      "Update parse_issue_ref to convert a number-only ref into owner/repo/number when repo_hint exists.",
+      "Run the focused client tests and verify the other reference formats still pass."
+    ],
+    "positive_signals": ["The issue points to a specific parser entry point."],
+    "warning_signals": ["Parser changes can break other accepted issue reference formats."],
+    "is_good_first_issue": true,
+    "files_to_focus": ["src/github/client.py", "tests/test_client.py"],
+    "why_these_files": [
+      "src/github/client.py contains the parsing function named in the issue.",
+      "tests/test_client.py is the right place for the regression test requested by the maintainer."
+    ],
+    "uncertainty_notes": []
+  }
+}

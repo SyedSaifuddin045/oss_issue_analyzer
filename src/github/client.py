@@ -36,6 +36,7 @@ class GitHubIssueComment:
     user_login: str
     created_at: str
     reactions: int
+    is_maintainer: bool = False
 
 
 class GitHubClient:
@@ -68,7 +69,6 @@ class GitHubClient:
         ref: str,
         repo_hint: str | None = None,
     ) -> tuple[str, str, int]:
-        """Parse an issue reference into owner, repo, and issue number."""
         normalized = ref.strip()
 
         for pattern in (ISSUE_URL_RE, ISSUE_HASH_RE, ISSUE_SLASH_RE):
@@ -94,7 +94,6 @@ class GitHubClient:
         return parts[0], parts[1]
 
     def get_issue(self, owner: str, repo: str, issue_num: int) -> GitHubIssue:
-        """Fetch a single issue from a repository."""
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{issue_num}"
         response = self.client.get(url)
         response.raise_for_status()
@@ -107,7 +106,6 @@ class GitHubClient:
         state: str = "open",
         labels: list[str] | None = None,
     ) -> list[GitHubIssue]:
-        """Fetch issues from a repository, excluding pull requests."""
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues"
         params: dict[str, str | int] = {"state": state, "per_page": 100}
         if labels:
@@ -154,8 +152,8 @@ class GitHubClient:
         repo: str,
         issue_num: int,
         limit: int = 7,
+        issue_author: str | None = None,
     ) -> list[GitHubIssueComment]:
-        """Fetch comments for an issue, sorted by importance."""
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{issue_num}/comments"
         params: dict[str, str | int] = {"per_page": 100}
 
@@ -178,12 +176,15 @@ class GitHubClient:
                 break
             page += 1
 
-        return self._prioritize_comments(all_comments, limit)
+        return self._prioritize_comments(
+            all_comments,
+            limit=limit,
+            repo_owner=owner,
+            issue_author=issue_author,
+        )
 
     def _build_comment(self, data: dict) -> GitHubIssueComment:
-        reactions = 0
-        if "reactions" in data:
-            reactions = data["reactions"].get("total_count", 0)
+        reactions = data.get("reactions", {}).get("total_count", 0)
         return GitHubIssueComment(
             id=data["id"],
             body=data.get("body") or "",
@@ -196,31 +197,31 @@ class GitHubClient:
         self,
         comments: list[GitHubIssueComment],
         limit: int,
+        repo_owner: str = "",
+        issue_author: str | None = None,
     ) -> list[GitHubIssueComment]:
-        """Sort comments by: maintainer first (by repo login), then by reactions."""
         if not comments:
             return []
 
-        repo_logins = set()
-        try:
-            user_response = self.client.get(self.BASE_URL)
-            if user_response.status_code == 200:
-                user_response = self.client.get(f"{self.BASE_URL}/user")
-                if user_response.status_code == 200:
-                    repo_logins.add(user_response.json().get("login", ""))
-        except Exception:
-            pass
+        maintainer_logins = {repo_owner.lower()}
+        if issue_author:
+            maintainer_logins.add(issue_author.lower())
 
-        def comment_priority(comment: GitHubIssueComment) -> tuple[int, int]:
-            is_maintainer = 1 if comment.user_login in repo_logins else 0
-            return (-is_maintainer, -comment.reactions)
+        for comment in comments:
+            comment.is_maintainer = comment.user_login.lower() in maintainer_logins
+
+        def comment_priority(comment: GitHubIssueComment) -> tuple[int, int, str]:
+            return (
+                0 if comment.is_maintainer else 1,
+                -comment.reactions,
+                comment.created_at,
+            )
 
         sorted_comments = sorted(comments, key=comment_priority)
         return sorted_comments[:limit]
 
 
 def load_issue_from_file(path: str) -> GitHubIssue:
-    """Load a local markdown issue file with a leading `# title` heading."""
     file_path = Path(path)
     if not file_path.exists():
         raise ValueError(f"File not found: {path}")

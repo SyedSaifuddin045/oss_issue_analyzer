@@ -2,30 +2,63 @@ from __future__ import annotations
 
 import json
 import unittest
-from unittest.mock import MagicMock
 
-from src.analyzer.ai_scorer import (
-    AIScorer,
-    build_ai_prompt,
-    parse_ai_response,
-    AIScoringError,
-)
+from src.analyzer.ai_scorer import AIScorer, build_ai_prompt, build_ai_request, parse_ai_response, pack_context_units
+from src.analyzer.llm_provider import LLMRequest, MockProvider
+from src.analyzer.preprocessor import ExtractedFile, IssueCommentContext, IssueType, ProcessedIssue
 from src.analyzer.retriever import RetrievalResult, RetrievedUnit
-from src.analyzer.preprocessor import ProcessedIssue, IssueType, ExtractedFile
-from src.analyzer.scorer import ScoringResult, DifficultyScore
+from src.analyzer.scorer import DifficultyScore, ScoringResult
+
+
+def make_valid_response(**overrides) -> str:
+    payload = {
+        "difficulty": "easy",
+        "confidence": 0.88,
+        "core_problem": "The issue likely lives in issue reference parsing and needs a regression test.",
+        "strategic_guidance": [
+            "Reproduce the failing issue number parsing path before editing code.",
+            "Trace parse_issue_ref through the owner/repo fallback logic.",
+            "Compare the failing path with the URL and owner/repo#num parsing branches.",
+            "Be careful to preserve existing accepted issue reference formats.",
+        ],
+        "suggested_approach": [
+            "Add a failing test for plain issue numbers.",
+            "Update parse_issue_ref to support the missing case.",
+            "Run the focused client tests and verify no existing formats regress.",
+        ],
+        "positive_signals": ["A focused parser function is already identified."],
+        "warning_signals": ["Parsing changes can silently break accepted reference formats."],
+        "is_good_first_issue": True,
+        "files_to_focus": ["src/github/client.py", "tests/test_client.py"],
+        "why_these_files": [
+            "src/github/client.py contains parse_issue_ref, which is explicitly named in the issue.",
+            "tests/test_client.py is the fastest place to add a regression case.",
+        ],
+        "uncertainty_notes": [],
+    }
+    payload.update(overrides)
+    return json.dumps(payload)
 
 
 class TestBuildAIPrompt(unittest.TestCase):
-    def test_build_prompt_includes_issue_info(self):
+    def make_retrieval(self):
         issue = ProcessedIssue(
             title="Fix bug in parser",
-            body="The parser crashes when given empty input",
+            body="The parser crashes when given empty input.",
             issue_type=IssueType.BUG,
             mentioned_files=[ExtractedFile(path="src/parser.py")],
-            mentioned_symbols=[],
             searchable_text="parser crash empty",
+            comments=[
+                IssueCommentContext(
+                    body="Please add a regression test.",
+                    author="maintainer",
+                    is_maintainer=True,
+                    reactions=4,
+                )
+            ],
+            code_blocks=['raise RuntimeError("boom")'],
+            stack_traces=['File "src/parser.py", line 12, in parse'],
         )
-        
         retrieval = RetrievalResult(
             issue=issue,
             units=[
@@ -40,142 +73,126 @@ class TestBuildAIPrompt(unittest.TestCase):
                     signature="def parse(x):",
                     docstring="Parse input",
                     code="def parse(x):\n    return x",
+                    match_reasons=["explicit file mention", "exact symbol mention"],
                 )
             ],
         )
-        
-        prompt = build_ai_prompt(retrieval)
-        
+        return retrieval
+
+    def test_build_prompt_includes_issue_info_and_evidence(self):
+        prompt = build_ai_prompt(self.make_retrieval())
         self.assertIn("Fix bug in parser", prompt)
-        self.assertIn("BUG", prompt)
-        self.assertIn("src/parser.py", prompt)
-        self.assertIn("parse", prompt)
-
-    def test_build_prompt_includes_heuristic_context(self):
-        issue = ProcessedIssue(
-            title="Test issue",
-            body="Test body",
-            issue_type=IssueType.FEATURE,
-            mentioned_files=[],
-            mentioned_symbols=[],
-            searchable_text="test",
-        )
-        
-        heuristic_result = ScoringResult(
-            issue_title="Test issue",
-            overall_difficulty=DifficultyScore(
-                raw_score=0.3,
-                difficulty="easy",
-                confidence=0.8,
-            ),
-            positive_signals=["Has test files"],
-            warning_signals=["May affect production"],
-            suggested_approach=["Start in tests/"],
-        )
-        
-        retrieval = RetrievalResult(issue=issue, units=[])
-        prompt = build_ai_prompt(retrieval, heuristic_result)
-        
-        self.assertIn("Heuristic Analysis", prompt)
-        self.assertIn("easy", prompt)
-        self.assertIn("Has test files", prompt)
-
-    def test_build_prompt_includes_comments(self):
-        issue = ProcessedIssue(
-            title="Feature request",
-            body="Add new feature",
-            issue_type=IssueType.FEATURE,
-            mentioned_files=[],
-            mentioned_symbols=[],
-            searchable_text="feature",
-            comments=[
-                "Please follow the CONTRIBUTING.md guidelines when submitting PRs",
-                "Great idea! Please also add tests.",
-            ],
-        )
-        
-        retrieval = RetrievalResult(issue=issue, units=[])
-        prompt = build_ai_prompt(retrieval)
-        
+        self.assertIn("Type: BUG", prompt)
         self.assertIn("Issue Discussion & Comments", prompt)
-        self.assertIn("CONTRIBUTING.md", prompt)
-        self.assertIn("add tests", prompt)
+        self.assertIn("Why selected:", prompt)
+        self.assertIn('raise RuntimeError("boom")', prompt)
+
+    def test_build_request_uses_json_mode(self):
+        request = build_ai_request(self.make_retrieval(), temperature=0.2, max_tokens=900, context_unit_budget=4)
+        self.assertEqual(request.temperature, 0.2)
+        self.assertEqual(request.max_tokens, 900)
+        self.assertEqual(request.response_format, {"type": "json_object"})
+        self.assertIn("Return exactly one JSON object", request.system)
+
+    def test_context_packer_labels_unit_reasons(self):
+        packed = pack_context_units(self.make_retrieval(), context_unit_budget=3)
+        self.assertEqual(len(packed), 1)
+        self.assertIn("explicit file mention", packed[0].reason)
 
 
 class TestParseAIResponse(unittest.TestCase):
     def test_parses_valid_json(self):
-        response = json.dumps({
-            "difficulty": "easy",
-            "confidence": 0.9,
-            "reasoning": "Simple fix",
-            "suggested_approach": ["Step 1", "Step 2"],
-            "positive_signals": ["Good test coverage"],
-            "warning_signals": [],
-            "is_good_first_issue": True,
-            "files_to_focus": ["src/main.py"],
-        })
-        
-        result = parse_ai_response(response)
-        
+        result = parse_ai_response(make_valid_response())
         self.assertEqual(result["difficulty"], "easy")
-        self.assertEqual(result["confidence"], 0.9)
-        self.assertEqual(result["suggested_approach"], ["Step 1", "Step 2"])
-        self.assertTrue(result["is_good_first_issue"])
-
-    def test_handles_missing_fields(self):
-        response = '{"difficulty": "medium"}'
-        
-        result = parse_ai_response(response)
-        
-        self.assertEqual(result["difficulty"], "medium")
-        self.assertEqual(result["confidence"], 0.5)
-        self.assertEqual(result["suggested_approach"], [])
-
-    def test_handles_invalid_difficulty(self):
-        response = '{"difficulty": "impossible"}'
-        
-        result = parse_ai_response(response)
-        
-        self.assertEqual(result["difficulty"], "medium")
+        self.assertEqual(result["files_to_focus"][0], "src/github/client.py")
 
     def test_extracts_json_from_text(self):
-        response = '''Here is my analysis:
-{
-    "difficulty": "hard",
-    "confidence": 0.7
-}
-Hope this helps!'''
-        
+        response = f"Here is the analysis:\n{make_valid_response()}\nThanks!"
         result = parse_ai_response(response)
-        
-        self.assertEqual(result["difficulty"], "hard")
-        self.assertEqual(result["confidence"], 0.7)
+        self.assertEqual(result["difficulty"], "easy")
+
+    def test_rejects_schema_drift(self):
+        with self.assertRaises(ValueError):
+            parse_ai_response(
+                json.dumps(
+                    {
+                        "difficulty": "easy",
+                        "confidence": 0.9,
+                        "core_problem": "x",
+                        "strategic_guidance": ["a", "b", "c", "d"],
+                        "suggested_approach": ["1", "2", "3"],
+                        "positive_signals": [],
+                        "warning_signals": [],
+                        "is_good_first_issue": True,
+                        "files_to_focus": [],
+                        "why_these_files": [],
+                        "uncertainty_notes": [],
+                        "extra_field": "not allowed",
+                    }
+                )
+            )
 
     def test_raises_on_invalid_json(self):
-        response = "not valid json at all"
-        
         with self.assertRaises(ValueError):
-            parse_ai_response(response)
+            parse_ai_response("not valid json at all")
 
 
 class TestAIScorerBasic(unittest.TestCase):
-    def test_parse_ai_response_with_various_difficulties(self):
-        for difficulty in ["easy", "medium", "hard"]:
-            response = json.dumps({"difficulty": difficulty, "confidence": 0.8})
-            result = parse_ai_response(response)
-            self.assertEqual(result["difficulty"], difficulty)
+    def test_ai_scorer_returns_richer_fields(self):
+        retrieval = RetrievalResult(
+            issue=ProcessedIssue(
+                title="Fix issue parsing",
+                body="Fix plain number parsing",
+                issue_type=IssueType.BUG,
+                mentioned_files=[ExtractedFile(path="src/github/client.py")],
+                searchable_text="parse issue references",
+            ),
+            units=[
+                RetrievedUnit(
+                    id="u1",
+                    path="src/github/client.py",
+                    name="parse_issue_ref",
+                    unit_type="function",
+                    language="python",
+                    start_line=1,
+                    end_line=20,
+                    signature="def parse_issue_ref(ref):",
+                    docstring="Parse issue references",
+                    code="def parse_issue_ref(ref):\n    return ref\n",
+                    match_reasons=["explicit file mention"],
+                )
+            ],
+        )
 
-    def test_default_values_for_optional_fields(self):
-        response = json.dumps({
-            "difficulty": "easy",
-        })
-        result = parse_ai_response(response)
-        
-        self.assertIn("reasoning", result)
-        self.assertIn("positive_signals", result)
-        self.assertIn("warning_signals", result)
-        self.assertIn("is_good_first_issue", result)
-        self.assertIn("files_to_focus", result)
+        heuristic_result = ScoringResult(
+            issue_title="Fix issue parsing",
+            overall_difficulty=DifficultyScore(raw_score=0.3, difficulty="easy", confidence=0.8),
+            positive_signals=["Has a focused entry point"],
+            warning_signals=["Needs regression coverage"],
+            suggested_approach=["1. Add a failing test"],
+            why_these_files=["src/github/client.py is the parsing entry point"],
+            uncertainty_notes=["No stack trace was provided."],
+        )
+
+        class FallbackScorer:
+            def score(self, retrieval):
+                return heuristic_result
+
+        scorer = AIScorer(
+            provider=MockProvider(make_valid_response()),
+            fallback_scorer=FallbackScorer(),
+            context_unit_budget=4,
+        )
+        result = scorer.score(retrieval)
+
+        self.assertEqual(result.overall_difficulty.difficulty, "easy")
+        self.assertTrue(result.why_these_files)
+        self.assertEqual(result.uncertainty_notes, [])
+
+    def test_ai_scorer_signature_changes_with_settings(self):
+        scorer_a = AIScorer(provider=MockProvider(make_valid_response()), temperature=0.1, max_tokens=800, context_unit_budget=6)
+        scorer_b = AIScorer(provider=MockProvider(make_valid_response()), temperature=0.2, max_tokens=800, context_unit_budget=6)
+        self.assertNotEqual(scorer_a.get_analysis_signature(), scorer_b.get_analysis_signature())
 
 
 if __name__ == "__main__":
