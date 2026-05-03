@@ -5,12 +5,14 @@ A CLI tool that helps first-time open source contributors analyze GitHub issues 
 ## Features
 
 - **Mixed Repository Indexing** - Parse code and index selected config, workflow, and documentation files
+- **Expanded Language Support** - Index Python, JavaScript, TypeScript, Go, Rust, Java, C, and C++
 - **GitHub Issue Integration** - Fetch issues directly from GitHub
 - **Bulk Issue Scanning** - Quick heuristic scoring (~80% accurate) for ALL issues using parallel processing
 - **AI-Powered Scoring** - Supports multiple LLM providers (OpenAI, Anthropic, Google, Azure OpenAI) for intelligent difficulty estimation and suggestions
 - **Heuristic Fallback** - Rule-based scoring when AI is unavailable
 - **Hybrid Retrieval** - Semantic + keyword search against indexed code
 - **Contributing Signals** - Identifies test files, documentation, and isolated changes
+- **Dependency-Aware Scoring** - Parses core dependency manifests and flags dependency-hell risk factors
 - **Issue Comments Context** - Includes GitHub issue comments (prioritized by maintainer input and popularity) to understand expected practices
 - **Smart Caching** - Minimizes API calls and costs (98% reduction in AI costs)
 
@@ -53,6 +55,10 @@ oss-issue-analyzer index .
 ```
 
 This creates a `.oss-index/` folder in the repository root containing vector embeddings for code and selected project text assets.
+
+Supported code languages: Python, JavaScript, TypeScript, Go, Rust, Java, C, and C++.
+
+When using mixed indexing, the tool also indexes dependency and build manifests such as `pyproject.toml`, `requirements.txt`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`, Gradle files, `CMakeLists.txt`, Conan manifests, and `vcpkg.json`.
 
 **Options:**
 ```bash
@@ -203,7 +209,7 @@ When an AI provider is configured, the tool:
 4. **Sends to LLM** for intelligent analysis
 5. **Falls back to heuristics** if AI is unavailable
 
-**Without AI**, the tool uses rule-based heuristics to estimate difficulty based on code complexity, file types, and metadata.
+**Without AI**, the tool uses rule-based heuristics to estimate difficulty based on code complexity, file types, dependency complexity, and issue metadata.
 
 ## Output Example
 

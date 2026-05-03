@@ -10,9 +10,10 @@ import lancedb
 import pyarrow as pa
 from lancedb.pydantic import LanceModel
 
+from src.indexer.dependencies import DependencyProfile
 from src.indexer.parser import ParsedUnit
 
-INDEX_SCHEMA_VERSION = 2
+INDEX_SCHEMA_VERSION = 3
 
 
 def get_code_unit_schema(default_vector_size: int = 768) -> pa.Schema:
@@ -89,6 +90,20 @@ class Repository(LanceModel):
     indexed_at: datetime = field(default_factory=datetime.utcnow)
 
 
+class DependencyProfileRecord(LanceModel):
+    repo_id: str
+    manifest_count: int = 0
+    ecosystems: list[str] = field(default_factory=list)
+    manifest_paths: list[str] = field(default_factory=list)
+    direct_dependency_count: int = 0
+    dev_dependency_count: int = 0
+    unpinned_or_broad_range_count: int = 0
+    git_or_path_dependency_count: int = 0
+    override_or_replace_count: int = 0
+    workspace_or_multi_module: bool = False
+    risk_flags: list[str] = field(default_factory=list)
+
+
 class VectorStore:
     def __init__(self, db_path: str = ".oss-index/index.lance", vector_size: int = 768):
         self.db_path = Path(db_path)
@@ -109,6 +124,11 @@ class VectorStore:
         if "repositories" not in self.db.table_names():
             return self.db.create_table("repositories", schema=Repository, mode="overwrite")
         return self.db.open_table("repositories")
+
+    def _get_dependency_profile_table(self):
+        if "dependency_profiles" not in self.db.table_names():
+            return self.db.create_table("dependency_profiles", schema=DependencyProfileRecord, mode="overwrite")
+        return self.db.open_table("dependency_profiles")
 
     @staticmethod
     def compute_file_hash(file_path: str, content: str) -> str:
@@ -234,6 +254,7 @@ class VectorStore:
         records = table.to_arrow().to_pylist()
         ids = [record["id"] for record in records if record.get("repo_id") == repo_id]
         deleted = self._delete_records_by_ids(ids)
+        self.delete_dependency_profile(repo_id)
         self.delete_repository(repo_id)
         return deleted
 
@@ -262,6 +283,31 @@ class VectorStore:
                 return repo
         return None
 
+    def add_dependency_profile(self, profile: DependencyProfile) -> None:
+        table = self._get_dependency_profile_table()
+        if self.get_dependency_profile(profile.repo_id):
+            table.delete(f"repo_id = '{self._escape(profile.repo_id)}'")
+        table.add([profile.to_record()])
+
+    def get_dependency_profile(self, repo_id: str) -> DependencyProfile | None:
+        if "dependency_profiles" not in self.db.table_names():
+            return None
+        records = self._get_dependency_profile_table().to_arrow().to_pylist()
+        for record in records:
+            if record.get("repo_id") == repo_id:
+                return DependencyProfile(**record)
+        return None
+
+    def delete_dependency_profile(self, repo_id: str) -> int:
+        if "dependency_profiles" not in self.db.table_names():
+            return 0
+        table = self._get_dependency_profile_table()
+        existing = self.get_dependency_profile(repo_id)
+        if not existing:
+            return 0
+        table.delete(f"repo_id = '{self._escape(repo_id)}'")
+        return 1
+
     def is_compatible_schema(self) -> bool:
         table_names = set(self.db.table_names())
         if "code_units" in table_names:
@@ -271,6 +317,11 @@ class VectorStore:
         if "repositories" in table_names:
             repo_fields = set(self._get_repo_table().schema.names)
             if "schema_version" not in repo_fields or "index_mode" not in repo_fields:
+                return False
+        if "dependency_profiles" in table_names:
+            dependency_fields = set(self._get_dependency_profile_table().schema.names)
+            required_fields = {"repo_id", "manifest_count", "risk_flags"}
+            if not required_fields.issubset(dependency_fields):
                 return False
         return True
 
@@ -370,6 +421,7 @@ CodeIndex = VectorStore
 __all__ = [
     "INDEX_SCHEMA_VERSION",
     "CodeUnit",
+    "DependencyProfileRecord",
     "Repository",
     "VectorStore",
     "CodeIndex",

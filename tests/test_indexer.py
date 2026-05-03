@@ -4,8 +4,10 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from src.indexer.dependencies import DependencyProfile
 from src.indexer.indexer import CodeIndexer, IndexerConfig, index_repository
 from src.indexer.parser import AssetKind, ParsedUnit, UnitType
+from src.indexer.storage import VectorStore
 
 
 class FakeEmbedder:
@@ -20,6 +22,7 @@ class FakeVectorStore:
         self.file_hashes: dict[tuple[str, str], str] = {}
         self.deleted_files: list[tuple[str, str]] = []
         self.added_payloads: list[tuple[list[ParsedUnit], str, dict[str, list[float]], str]] = []
+        self.dependency_profiles: dict[str, DependencyProfile] = {}
 
     def get_repository(self, repo_id: str):
         return self.repos.get(repo_id)
@@ -55,6 +58,12 @@ class FakeVectorStore:
             "total_units": 2,
             "by_type": {"file": 1, "function": 1},
         }
+
+    def add_dependency_profile(self, profile: DependencyProfile) -> None:
+        self.dependency_profiles[profile.repo_id] = profile
+
+    def get_dependency_profile(self, repo_id: str) -> DependencyProfile | None:
+        return self.dependency_profiles.get(repo_id)
 
 
 class FakeParser:
@@ -154,7 +163,7 @@ class IndexerTests(unittest.TestCase):
             }
 
             self.assertEqual(discovered["app.py"], AssetKind.CODE)
-            self.assertEqual(discovered["pyproject.toml"], AssetKind.CONFIG)
+            self.assertEqual(discovered["pyproject.toml"], AssetKind.DEPENDENCY)
             self.assertEqual(discovered["README.md"], AssetKind.DOCS)
             self.assertEqual(discovered["docs/guide.md"], AssetKind.DOCS)
             self.assertEqual(discovered[".github/workflows/ci.yml"], AssetKind.WORKFLOW)
@@ -186,11 +195,11 @@ class IndexerTests(unittest.TestCase):
             repo_id = mixed_indexer._get_or_create_repo(repo_path)
             mixed_indexer.repo_id = repo_id
 
-            units_added = mixed_indexer._index_file(config_file, repo_path, AssetKind.CONFIG)
+            units_added = mixed_indexer._index_file(config_file, repo_path, AssetKind.DEPENDENCY)
 
             self.assertEqual(units_added, 1)
             added_unit = fake_store.added_payloads[0][0][0]
-            self.assertEqual(added_unit.asset_kind, AssetKind.CONFIG)
+            self.assertEqual(added_unit.asset_kind, AssetKind.DEPENDENCY)
             self.assertEqual(added_unit.unit_type, UnitType.CONFIG)
             self.assertEqual(added_unit.name, "pyproject.toml")
 
@@ -206,6 +215,32 @@ class IndexerTests(unittest.TestCase):
                 for path, _asset_kind in code_only_indexer._discover_files(repo_path)
             }
             self.assertNotIn("pyproject.toml", discovered)
+
+            dependency_profile = code_only_indexer._analyze_dependencies(repo_path)
+            self.assertEqual(dependency_profile.manifest_count, 1)
+            self.assertIn("python", dependency_profile.ecosystems)
+
+    def test_parser_registry_supports_expanded_languages(self) -> None:
+        import src.indexer.parser as parser_module
+
+        expected = {
+            ".go": "go",
+            ".rs": "rust",
+            ".java": "java",
+            ".c": "c",
+            ".h": "c",
+            ".cc": "cpp",
+            ".cpp": "cpp",
+            ".cxx": "cpp",
+            ".hpp": "cpp",
+            ".hh": "cpp",
+            ".hxx": "cpp",
+        }
+
+        for extension, language in expected.items():
+            parser = parser_module.get_parser_for_file(f"demo{extension}")
+            self.assertIsNotNone(parser)
+            self.assertEqual(parser.language, language)
 
     def test_index_repository_calls_run(self) -> None:
         captured: dict[str, str] = {}
@@ -229,6 +264,20 @@ class IndexerTests(unittest.TestCase):
 
         self.assertEqual(result, {"repo_id": "abc123"})
         self.assertEqual(captured["repo_path"], "/tmp/example")
+
+    def test_vector_store_rejects_outdated_repo_schema(self) -> None:
+        store = VectorStore.__new__(VectorStore)
+        store.is_compatible_schema = lambda: True
+        store.get_repository = lambda repo_id: {
+            "id": repo_id,
+            "schema_version": 2,
+            "index_mode": "mixed",
+        }
+
+        is_compatible, error = VectorStore.validate_repo_compatibility(store, "repo-1")
+
+        self.assertFalse(is_compatible)
+        self.assertIn("Repository index is outdated", error)
 
 
 if __name__ == "__main__":

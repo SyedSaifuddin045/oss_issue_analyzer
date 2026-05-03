@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
+from src.indexer.dependencies import DependencyAnalyzer
 from src.indexer.parser import AssetKind, ParsedUnit, UnitType, get_parser_for_file, MultiLanguageParser
 from src.indexer.storage import INDEX_SCHEMA_VERSION, Repository
 
@@ -98,6 +99,9 @@ class CodeIndexer:
                     self.console.print(f"[yellow]Warning: Failed to index {file_path}: {e}[/yellow]")
                 progress.update(task, advance=1)
 
+        dependency_profile = self._analyze_dependencies(repo_path)
+        self.vector_store.add_dependency_profile(dependency_profile)
+
         stats = self.vector_store.get_stats(self.repo_id)
         self.console.print(f"[bold green]Indexed {total_units} units![/bold green]")
 
@@ -150,6 +154,14 @@ class CodeIndexer:
             ".go": "go",
             ".rs": "rust",
             ".java": "java",
+            ".c": "c",
+            ".h": "c",
+            ".cc": "cpp",
+            ".cpp": "cpp",
+            ".cxx": "cpp",
+            ".hpp": "cpp",
+            ".hh": "cpp",
+            ".hxx": "cpp",
         }
         
         for ext, count in sorted(extensions.items(), key=lambda x: -x[1])[:5]:
@@ -167,6 +179,9 @@ class CodeIndexer:
                     files.append((file_path, AssetKind.CODE))
                     continue
                 if self.config.index_mode == "mixed":
+                    if DependencyAnalyzer.is_dependency_manifest(relative_path):
+                        files.append((file_path, AssetKind.DEPENDENCY))
+                        continue
                     asset_kind = self._classify_non_code_asset(relative_path)
                     if asset_kind is not None:
                         files.append((file_path, asset_kind))
@@ -273,13 +288,14 @@ class CodeIndexer:
             return all_units
 
         unit_type = UnitType.DOCUMENT if asset_kind == AssetKind.DOCS else UnitType.CONFIG
+        language = "dependency" if asset_kind == AssetKind.DEPENDENCY else "text"
         return [
             ParsedUnit(
                 id=f"{self.repo_id}:{relative_path}:1-{max(content.count(chr(10)) + 1, 1)}:{asset_kind.value}",
                 repo_id=self.repo_id,
                 unit_type=unit_type,
                 path=relative_path,
-                language="text",
+                language=language,
                 start_line=1,
                 end_line=max(content.count("\n") + 1, 1),
                 signature=None,
@@ -293,6 +309,9 @@ class CodeIndexer:
     def _build_embedding_text(self, unit: ParsedUnit) -> str:
         if unit.asset_kind == AssetKind.CODE:
             return unit.code[:2000]
+        if unit.asset_kind == AssetKind.DEPENDENCY:
+            normalized_path = unit.path.replace("/", " ")
+            return f"dependency manifest {normalized_path}\n{unit.code[:4000]}".strip()
         normalized_path = unit.path.replace("/", " ")
         return f"{unit.asset_kind.value} {normalized_path}\n{unit.code[:4000]}".strip()
 
@@ -323,6 +342,17 @@ class CodeIndexer:
             if posix_path.match(pattern) or fnmatch(relative_path, pattern):
                 return AssetKind.CONFIG
         return None
+
+    def _analyze_dependencies(self, repo_path: Path):
+        manifest_paths = []
+        for file_path in repo_path.rglob("*"):
+            if file_path.is_file() and not self._should_skip(file_path):
+                manifest_paths.append(file_path.relative_to(repo_path).as_posix())
+        return DependencyAnalyzer.analyze_repository(
+            repo_path,
+            self.repo_id,
+            candidate_paths=manifest_paths,
+        )
 
     def _ensure_embedder_loaded(self) -> None:
         if self.embedder is None:

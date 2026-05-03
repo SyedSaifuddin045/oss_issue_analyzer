@@ -117,6 +117,21 @@ def build_ai_prompt(
             )
         prompt_parts.append("")
 
+    if retrieval.dependency_profile and retrieval.dependency_profile.manifest_count:
+        profile = retrieval.dependency_profile
+        prompt_parts.extend(
+            [
+                "## Repository Dependency Context",
+                f"Manifests: {profile.manifest_count}",
+                f"Ecosystems: {', '.join(profile.ecosystems) or 'unknown'}",
+                f"Direct dependencies: {profile.direct_dependency_count}",
+                f"Dev dependencies: {profile.dev_dependency_count}",
+            ]
+        )
+        if profile.risk_flags:
+            prompt_parts.append("Dependency risks: " + "; ".join(profile.risk_flags[:3]))
+        prompt_parts.append("")
+
     prompt_parts.append(f"## Ranked Code Context ({len(packed_units)} selected units)")
     for index, packed in enumerate(packed_units, start=1):
         unit = packed.unit

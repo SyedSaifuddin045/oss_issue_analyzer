@@ -80,7 +80,14 @@ class TestBulkProcessor(unittest.TestCase):
         ]
 
         processor = BulkProcessor(db_path="/nonexistent", repo_id="test123")
-        result = processor.process_issues(issues, limit=5)
+        with patch("src.analyzer.bulk_processor._make_worker_state") as mock_state:
+            mock_state.return_value = (MagicMock(), MagicMock(), MagicMock())
+            with patch("src.analyzer.bulk_processor._process_single_issue") as mock_process:
+                mock_process.side_effect = [
+                    {"number": issue.number, "title": issue.title, "difficulty": "easy", "confidence": 0.8, "quick_score": 0.2}
+                    for issue in issues[:5]
+                ]
+                result = processor.process_issues(issues, limit=5)
 
         self.assertEqual(len(result), 5)
 
@@ -136,6 +143,17 @@ class TestBulkProcessor(unittest.TestCase):
         with patch("os.cpu_count", return_value=16):
             processor = BulkProcessor(db_path="/nonexistent", repo_id="test123")
             self.assertEqual(processor.max_workers, 8)  # Capped at 8
+
+    @patch("src.analyzer.bulk_processor.HybridRetriever")
+    def test_make_worker_state_sets_repo_once_for_dependency_context(self, mock_retriever_class):
+        from src.analyzer.bulk_processor import _make_worker_state
+
+        mock_retriever = MagicMock()
+        mock_retriever_class.return_value = mock_retriever
+
+        _make_worker_state("/tmp/index.lance", "repo-123")
+
+        mock_retriever.set_repo.assert_called_once_with("repo-123")
 
 
 if __name__ == "__main__":

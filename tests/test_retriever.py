@@ -4,6 +4,7 @@ import unittest
 
 from src.analyzer.preprocessor import ExtractedFile, ExtractedSymbol, IssueType, ProcessedIssue
 from src.analyzer.retriever import HybridRetriever
+from src.indexer.dependencies import DependencyProfile
 
 
 class FakeEmbedder:
@@ -13,6 +14,9 @@ class FakeEmbedder:
 
 
 class FakeVectorStore:
+    def __init__(self):
+        self.profile_calls = 0
+
     def search(self, query: str, query_embedding: list[float], repo_id: str | None = None, unit_type: str | None = None, limit: int = 10) -> list[dict]:
         return [
             {
@@ -93,6 +97,10 @@ class FakeVectorStore:
             ]
         return []
 
+    def get_dependency_profile(self, repo_id: str) -> DependencyProfile:
+        self.profile_calls += 1
+        return DependencyProfile(repo_id=repo_id, manifest_count=1, ecosystems=["python"], manifest_paths=["pyproject.toml"])
+
 
 class RetrieverTests(unittest.TestCase):
     def test_hybrid_retriever_preserves_multiple_units_from_same_file(self) -> None:
@@ -172,6 +180,27 @@ class RetrieverTests(unittest.TestCase):
         result = retriever.search(issue, repo_id="repo-1", limit=5)
         self.assertEqual(result.units[0].asset_kind, "docs")
         self.assertLess(result.units[0].score, 0.5)
+
+    def test_hybrid_retriever_attaches_cached_dependency_profile(self) -> None:
+        retriever = HybridRetriever(embedder=FakeEmbedder())
+        retriever._vector_store = FakeVectorStore()
+
+        issue = ProcessedIssue(
+            title="Fix parsing plain issue numbers",
+            body="`parse_issue_ref` fails for issue 42 in src/github/client.py",
+            issue_type=IssueType.BUG,
+            mentioned_files=[ExtractedFile(path="src/github/client.py")],
+            mentioned_symbols=[ExtractedSymbol(name="parse_issue_ref")],
+            searchable_text="Fix parsing plain issue numbers parse_issue_ref src/github/client.py",
+        )
+
+        first = retriever.search(issue, repo_id="repo-1", limit=5)
+        second = retriever.search(issue, repo_id="repo-1", limit=5)
+
+        self.assertIsNotNone(first.dependency_profile)
+        self.assertEqual(first.dependency_profile.manifest_count, 1)
+        self.assertEqual(retriever._vector_store.profile_calls, 1)
+        self.assertIsNotNone(second.dependency_profile)
 
 
 if __name__ == "__main__":

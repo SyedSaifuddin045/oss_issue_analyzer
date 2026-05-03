@@ -22,6 +22,7 @@ class UnitType(str, Enum):
 class AssetKind(str, Enum):
     CODE = "code"
     CONFIG = "config"
+    DEPENDENCY = "dependency"
     DOCS = "docs"
     WORKFLOW = "workflow"
 

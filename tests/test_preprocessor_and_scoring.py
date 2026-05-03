@@ -12,6 +12,7 @@ from src.analyzer.preprocessor import (
 )
 from src.analyzer.retriever import RetrievalResult, RetrievedUnit
 from src.analyzer.scorer import HeuristicScorer
+from src.indexer.dependencies import DependencyProfile
 
 
 class PreprocessorAndScoringTests(unittest.TestCase):
@@ -126,6 +127,58 @@ class PreprocessorAndScoringTests(unittest.TestCase):
         self.assertTrue(any("workflow changes" in suggestion for suggestion in result.suggested_approach))
         self.assertTrue(any("related configuration" in suggestion for suggestion in result.suggested_approach))
         self.assertNotIn("Clear interface", result.positive_signals)
+
+    def test_heuristic_scorer_accounts_for_dependency_complexity(self) -> None:
+        scorer = HeuristicScorer()
+        retrieval = RetrievalResult(
+            issue=ProcessedIssue(
+                title="Update dependency constraints",
+                body="Adjust versions in pyproject.toml to fix install conflicts.",
+                issue_type=IssueType.FEATURE,
+                mentioned_files=[ExtractedFile(path="pyproject.toml")],
+                searchable_text="Update dependency constraints pyproject.toml install conflicts",
+            ),
+            units=[
+                RetrievedUnit(
+                    id="dep-1",
+                    path="pyproject.toml",
+                    name="pyproject.toml",
+                    unit_type="config",
+                    language="dependency",
+                    start_line=1,
+                    end_line=40,
+                    signature=None,
+                    docstring=None,
+                    code="[project]\ndependencies = ['rich>=15.0.0']\n",
+                    asset_kind="dependency",
+                    match_type="explicit",
+                    match_reasons=["explicit file mention"],
+                )
+            ],
+            dependency_profile=DependencyProfile(
+                repo_id="repo-1",
+                manifest_count=2,
+                ecosystems=["python", "node"],
+                manifest_paths=["pyproject.toml", "package.json"],
+                direct_dependency_count=120,
+                dev_dependency_count=40,
+                unpinned_or_broad_range_count=18,
+                git_or_path_dependency_count=2,
+                override_or_replace_count=1,
+                workspace_or_multi_module=True,
+                risk_flags=[
+                    "Large dependency surface area",
+                    "Uses dependency overrides or replacements",
+                ],
+            ),
+        )
+
+        result = scorer.score(retrieval)
+
+        self.assertIn(result.overall_difficulty.difficulty, {"medium", "hard"})
+        self.assertGreater(result.overall_difficulty.raw_score, 0.5)
+        self.assertTrue(any("dependency" in warning.lower() for warning in result.warning_signals))
+        self.assertTrue(any("pyproject.toml" in suggestion for suggestion in result.suggested_approach))
 
 
 if __name__ == "__main__":

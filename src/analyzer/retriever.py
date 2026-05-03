@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 from src.analyzer.preprocessor import IssueType, ProcessedIssue
+from src.indexer.dependencies import DependencyProfile
 from src.indexer.parser import AssetKind
 
 if TYPE_CHECKING:
@@ -40,6 +41,7 @@ class RetrievalResult:
     issue: ProcessedIssue
     units: list[RetrievedUnit] = field(default_factory=list)
     search_stats: dict = field(default_factory=dict)
+    dependency_profile: DependencyProfile | None = None
 
 
 class HybridRetriever:
@@ -58,6 +60,7 @@ class HybridRetriever:
         self._embedder = embedder
         self._vector_store = None
         self._repo_id: Optional[str] = None
+        self._dependency_profile: DependencyProfile | None = None
 
     @property
     def embedder(self) -> Embedder:
@@ -74,6 +77,7 @@ class HybridRetriever:
 
     def set_repo(self, repo_id: str) -> None:
         self._repo_id = repo_id
+        self._dependency_profile = self.vector_store.get_dependency_profile(repo_id)
 
     def search(
         self,
@@ -81,7 +85,8 @@ class HybridRetriever:
         repo_id: str,
         limit: int = 10,
     ) -> RetrievalResult:
-        self._repo_id = repo_id
+        if self._dependency_profile is None or self._repo_id != repo_id:
+            self.set_repo(repo_id)
 
         semantic_results = self._semantic_search(issue, repo_id, max(limit * 3, 12))
         keyword_results = self._keyword_search(issue, repo_id, max(limit * 2, 8))
@@ -102,7 +107,12 @@ class HybridRetriever:
             "selected_count": len(combined),
         }
 
-        return RetrievalResult(issue=issue, units=combined, search_stats=search_stats)
+        return RetrievalResult(
+            issue=issue,
+            units=combined,
+            search_stats=search_stats,
+            dependency_profile=self._dependency_profile,
+        )
 
     def _semantic_search(
         self,

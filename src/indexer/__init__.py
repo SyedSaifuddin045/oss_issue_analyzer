@@ -21,6 +21,11 @@ __all__ = [
     "PythonParser",
     "JavaScriptParser",
     "TypeScriptParser",
+    "GoParser",
+    "RustParser",
+    "JavaParser",
+    "CParser",
+    "CppParser",
     "get_parser",
     "get_parser_for_file",
     "Embedder",
@@ -34,12 +39,26 @@ __all__ = [
     "CodeIndexer",
     "IndexerConfig",
     "index_repository",
+    "DependencyAnalyzer",
+    "DependencyProfile",
 ]
 
 
 def __getattr__(name: str):
-    if name in {"PythonParser", "JavaScriptParser", "TypeScriptParser"}:
+    if name in {
+        "PythonParser",
+        "JavaScriptParser",
+        "TypeScriptParser",
+        "GoParser",
+        "RustParser",
+        "JavaParser",
+        "CParser",
+        "CppParser",
+    }:
         module = importlib.import_module("src.indexer.languages")
+        return getattr(module, name)
+    if name in {"DependencyAnalyzer", "DependencyProfile"}:
+        module = importlib.import_module("src.indexer.dependencies")
         return getattr(module, name)
     if name in {"Embedder", "LocalNomicEmbedder", "MiniLMEmbedder", "get_embedder"}:
         module = importlib.import_module("src.indexer.embedder")

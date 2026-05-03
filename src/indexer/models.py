@@ -19,6 +19,8 @@ class Language(str, Enum):
     GO = "go"
     RUST = "rust"
     JAVA = "java"
+    C = "c"
+    CPP = "cpp"
 
 
 class ComplexityMetrics(BaseModel):
