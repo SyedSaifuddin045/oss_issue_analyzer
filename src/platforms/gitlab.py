@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional
 
 import httpx
@@ -15,25 +15,24 @@ from src.platforms.base import (
 )
 
 
-ISSUE_URL_RE = re.compile(
-    r"^(?:https?://)?(?:www\.)?github\.com/"
-    r"(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/(?P<number>\d+)/?$"
+GITLAB_URL_RE = re.compile(
+    r"^(?:https?://)?(?:www\.)?gitlab\.com/"
+    r"(?P<owner>[^/]+)/(?P<repo>[^/]+)/-/issues/(?P<number>\d+)/?$"
 )
-ISSUE_HASH_RE = re.compile(r"^(?P<owner>[^/]+)/(?P<repo>[^/]+)#(?P<number>\d+)$")
-ISSUE_SLASH_RE = re.compile(r"^(?P<owner>[^/]+)/(?P<repo>[^/]+)/(?P<number>\d+)$")
-ISSUE_NUMBER_RE = re.compile(r"^(?P<number>\d+)$")
+GITLAB_HASH_RE = re.compile(
+    r"^(?P<owner>[^/]+)/(?P<repo>[^/]+)#(?P<number>\d+)$"
+)
+GITLAB_SLASH_RE = re.compile(
+    r"^(?P<owner>[^/]+)/(?P<repo>[^/]+)/(?P<number>\d+)$"
+)
+GITLAB_NUMBER_RE = re.compile(r"^(?P<number>\d+)$")
 
 
-# Backward compatibility aliases
-GitHubIssue = Issue
-GitHubIssueComment = IssueComment
-
-
-class GitHubClient(PlatformClient):
-    BASE_URL = "https://api.github.com"
+class GitLabClient(PlatformClient):
+    BASE_URL = "https://gitlab.com/api/v4"
 
     def __init__(self, token: Optional[str] = None, timeout: float = 30.0):
-        self.token = token or os.environ.get("GITHUB_TOKEN")
+        self.token = token or os.environ.get("GITLAB_TOKEN") or os.environ.get("GITHUB_TOKEN")
         self.timeout = timeout
         self._client: Optional[httpx.Client] = None
 
@@ -41,12 +40,15 @@ class GitHubClient(PlatformClient):
     def client(self) -> httpx.Client:
         if self._client is None:
             headers = {
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
+                "Accept": "application/json",
             }
             if self.token:
-                headers["Authorization"] = f"Bearer {self.token}"
-            self._client = httpx.Client(headers=headers, timeout=self.timeout)
+                headers["PRIVATE-TOKEN"] = self.token
+            self._client = httpx.Client(
+                base_url=self.BASE_URL,
+                headers=headers,
+                timeout=self.timeout,
+            )
         return self._client
 
     def close(self) -> None:
@@ -61,29 +63,29 @@ class GitHubClient(PlatformClient):
     ) -> tuple[PlatformType, str, str, int]:
         normalized = ref.strip()
 
-        # Check for platform prefix (github:owner/repo#123)
+        # Check for platform prefix (gitlab:owner/repo#123)
         from src.platforms.base import PLATFORM_PREFIX_RE
         prefix_match = PLATFORM_PREFIX_RE.match(normalized)
         if prefix_match:
             rest = prefix_match.group("rest")
             return self.parse_issue_ref(rest, repo_hint)
 
-        for pattern in (ISSUE_URL_RE, ISSUE_HASH_RE, ISSUE_SLASH_RE):
+        for pattern in (GITLAB_URL_RE, GITLAB_HASH_RE, GITLAB_SLASH_RE):
             match = pattern.match(normalized)
             if match:
                 return (
-                    PlatformType.GITHUB,
+                    PlatformType.GITLAB,
                     match.group("owner"),
                     match.group("repo"),
                     int(match.group("number")),
                 )
 
-        number_match = ISSUE_NUMBER_RE.match(normalized)
+        number_match = GITLAB_NUMBER_RE.match(normalized)
         if number_match and repo_hint:
             owner, repo = self._parse_repo_hint(repo_hint)
-            return PlatformType.GITHUB, owner, repo, int(number_match.group("number"))
+            return PlatformType.GITLAB, owner, repo, int(number_match.group("number"))
 
-        raise ValueError(f"Invalid issue reference: {ref}")
+        raise ValueError(f"Invalid GitLab issue reference: {ref}")
 
     def _parse_repo_hint(self, repo_hint: str) -> tuple[str, str]:
         parts = repo_hint.strip().split("/", maxsplit=1)
@@ -91,8 +93,13 @@ class GitHubClient(PlatformClient):
             raise ValueError(f"Invalid repository reference: {repo_hint}")
         return parts[0], parts[1]
 
+    def _encode_project(self, owner: str, repo: str) -> str:
+        """Encode project path for GitLab API (URL-encoded)."""
+        return f"{owner}%2F{repo}"
+
     def get_issue(self, owner: str, repo: str, issue_num: int) -> Issue:
-        url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{issue_num}"
+        project = self._encode_project(owner, repo)
+        url = f"/projects/{project}/issues/{issue_num}"
         response = self.client.get(url)
         response.raise_for_status()
         return self._build_issue(response.json())
@@ -101,10 +108,11 @@ class GitHubClient(PlatformClient):
         self,
         owner: str,
         repo: str,
-        state: str = "open",
+        state: str = "opened",
         labels: Optional[list[str]] = None,
     ) -> list[Issue]:
-        url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues"
+        project = self._encode_project(owner, repo)
+        url = f"/projects/{project}/issues"
         params: dict[str, str | int] = {"state": state, "per_page": 100}
         if labels:
             params["labels"] = ",".join(labels)
@@ -122,8 +130,6 @@ class GitHubClient(PlatformClient):
                 break
 
             for item in data:
-                if "pull_request" in item:
-                    continue
                 issues.append(self._build_issue(item))
 
             if len(data) < 100:
@@ -134,15 +140,15 @@ class GitHubClient(PlatformClient):
 
     def _build_issue(self, data: dict) -> Issue:
         return Issue(
-            number=data["number"],
+            number=data["iid"],
             title=data["title"],
-            body=data.get("body") or "",
-            state=data["state"],
-            html_url=data["html_url"],
-            user_login=data["user"]["login"],
-            created_at=data["created_at"],
-            labels=[label["name"] for label in data.get("labels", [])],
-            platform=PlatformType.GITHUB,
+            body=data.get("description") or "",
+            state="open" if data.get("state") == "opened" else data.get("state", "unknown"),
+            html_url=data.get("web_url", ""),
+            user_login=data.get("author", {}).get("username", "unknown"),
+            created_at=data.get("created_at", ""),
+            labels=[label["name"] if isinstance(label, dict) else label for label in data.get("labels", [])],
+            platform=PlatformType.GITLAB,
         )
 
     def get_issue_comments(
@@ -153,7 +159,8 @@ class GitHubClient(PlatformClient):
         limit: int = 7,
         issue_author: Optional[str] = None,
     ) -> list[IssueComment]:
-        url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{issue_num}/comments"
+        project = self._encode_project(owner, repo)
+        url = f"/projects/{project}/issues/{issue_num}/notes"
         params: dict[str, str | int] = {"per_page": 100}
 
         all_comments: list[IssueComment] = []
@@ -183,52 +190,13 @@ class GitHubClient(PlatformClient):
         )
 
     def _build_comment(self, data: dict) -> IssueComment:
-        reactions = data.get("reactions", {}).get("total_count", 0)
         return IssueComment(
             id=data["id"],
             body=data.get("body") or "",
-            user_login=data["user"]["login"],
-            created_at=data["created_at"],
-            reactions=reactions,
+            user_login=data.get("author", {}).get("username", "unknown"),
+            created_at=data.get("created_at", ""),
+            reactions=data.get("upvotes", 0) + data.get("downvotes", 0),
         )
 
 
-def load_issue_from_file(path: str) -> Issue:
-    file_path = Path(path)
-    if not file_path.exists():
-        raise ValueError(f"File not found: {path}")
-
-    content = file_path.read_text(encoding="utf-8")
-    lines = content.splitlines()
-
-    title = ""
-    body_lines: list[str] = []
-    in_body = False
-
-    for line in lines:
-        if not title and line.startswith("# "):
-            title = line[2:].strip()
-            in_body = True
-            continue
-        if in_body:
-            body_lines.append(line)
-
-    if not title:
-        raise ValueError(f"Issue file must start with a '# ' title heading: {path}")
-
-    body = "\n".join(body_lines).strip()
-
-    return Issue(
-        number=0,
-        title=title,
-        body=body,
-        state="open",
-        html_url=file_path.resolve().as_uri(),
-        user_login="local",
-        created_at="",
-        labels=[],
-        platform=PlatformType.GITHUB,
-    )
-
-
-__all__ = ["GitHubClient", "GitHubIssue", "GitHubIssueComment", "load_issue_from_file"]
+__all__ = ["GitLabClient", "GITLAB_URL_RE", "GITLAB_HASH_RE", "GITLAB_SLASH_RE"]

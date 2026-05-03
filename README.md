@@ -1,19 +1,20 @@
 # OSS Issue Analyzer
 
-A CLI tool that helps first-time open source contributors analyze GitHub issues against their local cloned repositories. It indexes code plus selected project text assets, estimates difficulty using AI or heuristics, and helps contributors pick issues they can realistically solve.
+A CLI tool that helps first-time open source contributors analyze issues from GitHub, GitLab, and Bitbucket against their local cloned repositories. It indexes code plus selected project text assets, estimates difficulty using AI or heuristics, and helps contributors pick issues they can realistically solve.
 
 ## Features
 
+- **Multi-Platform Support** - Works with GitHub, GitLab, and Bitbucket repositories
 - **Mixed Repository Indexing** - Parse code and index selected config, workflow, and documentation files
 - **Expanded Language Support** - Index Python, JavaScript, TypeScript, Go, Rust, Java, C, and C++
-- **GitHub Issue Integration** - Fetch issues directly from GitHub
+- **Issue Integration** - Fetch issues directly from GitHub, GitLab, or Bitbucket
 - **Bulk Issue Scanning** - Quick heuristic scoring (~80% accurate) for ALL issues using parallel processing
 - **AI-Powered Scoring** - Supports multiple LLM providers (OpenAI, Anthropic, Google, Azure OpenAI) for intelligent difficulty estimation and suggestions
 - **Heuristic Fallback** - Rule-based scoring when AI is unavailable
 - **Hybrid Retrieval** - Semantic + keyword search against indexed code
 - **Contributing Signals** - Identifies test files, documentation, and isolated changes
 - **Dependency-Aware Scoring** - Parses core dependency manifests and flags dependency-hell risk factors
-- **Issue Comments Context** - Includes GitHub issue comments (prioritized by maintainer input and popularity) to understand expected practices
+- **Issue Comments Context** - Includes issue comments (prioritized by maintainer input and popularity) to understand expected practices
 - **Smart Caching** - Minimizes API calls and costs (98% reduction in AI costs)
 
 ## Installation
@@ -114,10 +115,14 @@ oss-issue-analyzer list-issues --interactive
 
 # Deep analysis (1 AI call for selected issue)
 oss-issue-analyzer analyze 123
+
+# Specify platform explicitly
+oss-issue-analyzer list-issues --platform gitlab
+oss-issue-analyzer analyze 123 --platform bitbucket
 ```
 
 **Cost Comparison:**
-| Approach | GitHub API Calls | AI API Calls | Cost |
+| Approach | Platform API Calls | AI API Calls | Cost |
 |-----------|-------------------|-----------------|------|
 | Analyze each issue | 50 + comments | 50 | $$$ |
 | **Bulk scan + select** | 1-2 + 1 (selected) | **1** | **$** |
@@ -127,7 +132,8 @@ oss-issue-analyzer analyze 123
 oss-issue-analyzer list-issues [OPTIONS]
 
 Options:
-  --repo OWNER/REPO       # GitHub repo (auto-detected from git)
+  --repo OWNER/REPO       # Repository (auto-detected from git)
+  --platform github|gitlab|bitbucket  # Platform [default: auto-detect]
   --state open|all|closed  # Filter by state [default: open]
   --sort difficulty|number|created  # Sort results
   --filter-difficulty easy|medium|hard
@@ -158,17 +164,27 @@ Tip: Run 'oss-issue-analyzer analyze <number>' for detailed AI analysis
 # Using issue number (run from the cloned repo directory)
 oss-issue-analyzer analyze 123
 
-# Using a GitHub URL
+# Using platform URLs
 oss-issue-analyzer analyze https://github.com/owner/repo/issues/123
+oss-issue-analyzer analyze https://gitlab.com/owner/repo/-/issues/123
+oss-issue-analyzer analyze https://bitbucket.org/owner/repo/issues/123
+
+# Using platform prefix
+oss-issue-analyzer analyze github:owner/repo#123
+oss-issue-analyzer analyze gitlab:owner/repo#123
+oss-issue-analyzer analyze bitbucket:owner/repo#123
 
 # Force AI provider
 oss-issue-analyzer analyze 123 --ai-provider openai
 
 # Disable AI and use heuristics only
 oss-issue-analyzer analyze 123 --no-ai
+
+# Specify platform explicitly
+oss-issue-analyzer analyze 123 --platform gitlab
 ```
 
-The tool automatically detects the GitHub remote from the local git repository.
+The tool automatically detects the platform from the git remote URL.
 
 **Options:**
 ```bash
@@ -182,7 +198,8 @@ Options:
   --db-path        Path to index database
   --embedder       Embedding model [default: minilm]
   --limit           Number of indexed units to retrieve [default: 10]
-  --gh-repo         GitHub repo (owner/repo) - auto-detected if not provided
+  --gh-repo         Repository (owner/repo) - auto-detected if not provided
+  --platform       Platform: github, gitlab, bitbucket [default: auto-detect]
   --ai-provider     AI provider to use (openai, anthropic, google, azure_openai)
   --no-ai          Disable AI scoring, use heuristics only
 ```
@@ -266,6 +283,9 @@ Create a `.env` file in your project root (see `.env.example` for template):
 | Variable | Description |
 |----------|-------------|
 | `GITHUB_TOKEN` | GitHub personal access token for API rate limits |
+| `GITLAB_TOKEN` | GitLab personal access token for API access |
+| `BITBUCKET_USERNAME` | Bitbucket username |
+| `BITBUCKET_APP_PASSWORD` | Bitbucket app password for API access |
 | `HF_TOKEN` | Hugging Face token for faster embedding downloads |
 | `OPENAI_API_KEY` | OpenAI API key |
 | `OPENAI_MODEL` | OpenAI model (default: gpt-4o-mini) |

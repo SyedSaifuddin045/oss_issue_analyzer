@@ -11,6 +11,15 @@ __version__ = "1.0.2"
 app = typer.Typer(add_completion=False, invoke_without_command=True)
 console = Console()
 
+# Platform type for CLI
+PlatformOption = typer.Option(
+    None,
+    "--platform",
+    "-p",
+    help="Platform: github, gitlab, bitbucket (auto-detected from git remote if not specified)",
+    case_sensitive=False,
+)
+
 
 class GlobalOptions:
     def __init__(
@@ -39,6 +48,55 @@ def _build_issue_comment_contexts(comments) -> list:
         )
         for comment in comments
     ]
+
+
+def get_platform_remote(repo_dir) -> tuple:
+    """Detect platform, owner, and repo from git remote URL."""
+    import subprocess
+    from src.platforms.base import detect_platform_from_remote, PlatformType
+
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        url = result.stdout.strip()
+
+        platform = detect_platform_from_remote(url)
+
+        if platform == PlatformType.GITHUB:
+            if "github.com" in url:
+                if url.startswith("git@github.com:"):
+                    parts = url.replace("git@github.com:", "").replace(".git", "").split("/")
+                else:
+                    parts = url.replace("https://github.com/", "").replace(".git", "").split("/")
+                if len(parts) >= 2:
+                    return platform, parts[0], parts[1]
+        elif platform == PlatformType.GITLAB:
+            if "gitlab.com" in url or "gitlab." in url:
+                url_clean = url.replace("git@", "").replace(".git", "")
+                if "://" in url_clean:
+                    url_clean = url_clean.split("://", 1)[1]
+                else:
+                    url_clean = url_clean.split(":", 1)[1] if ":" in url_clean else url_clean
+                parts = url_clean.split("/")
+                if len(parts) >= 2:
+                    return platform, parts[0], parts[1]
+        elif platform == PlatformType.BITBUCKET:
+            if "bitbucket.org" in url:
+                if url.startswith("git@bitbucket.org:"):
+                    parts = url.replace("git@bitbucket.org:", "").replace(".git", "").split("/")
+                else:
+                    parts = url.replace("https://bitbucket.org/", "").replace(".git", "").split("/")
+                if len(parts) >= 2:
+                    return platform, parts[0], parts[1]
+    except Exception:
+        pass
+
+    return None, None, None
 
 
 def _serialize_result(result) -> dict:
@@ -380,16 +438,17 @@ def analyze(
     db_path: Annotated[Optional[str], typer.Option("--db-path", help="Path to index database (auto-detect if omitted)")] = None,
     embedder: Annotated[str, typer.Option("--embedder", help="Embedding model (nomic, minilm)")] = "minilm",
     limit: Annotated[int, typer.Option("--limit", "-l", help="Number of code units to retrieve")] = 10,
-    gh_repo: Annotated[Optional[str], typer.Option("--gh-repo", help="GitHub repo (owner/repo) - auto-detected if not provided)")] = None,
+    gh_repo: Annotated[Optional[str], typer.Option("--gh-repo", help="Repository (owner/repo) - auto-detected if not provided)")] = None,
+    platform: Annotated[Optional[str], PlatformOption] = None,
     ai_provider: Annotated[Optional[str], typer.Option("--ai-provider", help="AI provider to use (openai, anthropic, google, azure_openai)")] = None,
     no_ai: Annotated[bool, typer.Option("--no-ai", help="Disable AI scoring, use heuristics only")] = False,
-    no_cache: Annotated[bool, typer.Option("--no-cache", help="Force re-fetch from GitHub")] = False,
+    no_cache: Annotated[bool, typer.Option("--no-cache", help="Force re-fetch from platform")] = False,
 ):
     from pathlib import Path
     import hashlib
-    import subprocess
-    
-    from src.github.client import GitHubClient, load_issue_from_file
+
+    from src.platforms.base import get_platform_client, PlatformType
+    from src.github.client import load_issue_from_file
     from src.analyzer.preprocessor import IssuePreprocessor
     from src.analyzer.retriever import HybridRetriever
     from src.analyzer.scorer import HeuristicScorer
@@ -398,46 +457,25 @@ def analyze(
     from src.analyzer.llm_provider import get_provider_instance
     from src.analyzer.ai_scorer import AIScorer
     from rich.panel import Panel
-    
-    def get_github_remote(repo_dir: Path) -> tuple[str, str]:
-        try:
-            result = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            url = result.stdout.strip()
-            if "github.com" in url:
-                if url.startswith("git@github.com:"):
-                    parts = url.replace("git@github.com:", "").replace(".git", "").split("/")
-                else:
-                    parts = url.replace("https://github.com/", "").replace(".git", "").split("/")
-                if len(parts) >= 2:
-                    return parts[0], parts[1]
-        except Exception:
-            pass
-        return None, None
-    
+
     try:
         if repo_path:
             repo_dir = Path(repo_path).resolve()
         else:
             repo_dir = Path(".").resolve()
-        
+
         if not repo_dir.exists():
             console.print(f"[bold red]Error:[/bold red] Repository path does not exist: {repo_dir}")
             raise typer.Exit(1)
         if not repo_dir.is_dir():
             console.print(f"[bold red]Error:[/bold red] Repository path must be a directory: {repo_dir}")
             raise typer.Exit(1)
-        
+
         if db_path is None:
             db_path = str(repo_dir / ".oss-index" / "index.lance")
-        
+
         repo_id = hashlib.sha256(str(repo_dir).encode()).hexdigest()[:16]
-        
+
         vector_store = VectorStore(db_path)
         is_compatible, compatibility_error = vector_store.validate_repo_compatibility(repo_id)
         if not is_compatible:
@@ -447,24 +485,48 @@ def analyze(
         if not existing_repo:
             console.print("[bold red]Error:[/bold red] Repository not indexed. Run 'oss-issue-analyzer index <repo_path>' first.")
             raise typer.Exit(1)
-        
+
         if Path(issue_ref).exists():
             issue = load_issue_from_file(issue_ref)
             issue_comments = []
         else:
-            owner, repo = gh_repo, None
-            if not owner:
-                owner, repo = get_github_remote(repo_dir)
-            
-            client = GitHubClient(token=global_options.api_key)
-            try:
-                if not owner or not repo:
-                    console.print("[bold red]Error:[/bold red] Cannot determine GitHub repo. Use --gh-repo flag or run in a git repo with remote origin.")
+            # Determine platform and repo
+            detected_platform = None
+            owner, repo = None, None
+
+            if platform:
+                platform = platform.lower()
+                if platform == "github":
+                    detected_platform = PlatformType.GITHUB
+                elif platform == "gitlab":
+                    detected_platform = PlatformType.GITLAB
+                elif platform == "bitbucket":
+                    detected_platform = PlatformType.BITBUCKET
+                else:
+                    console.print(f"[bold red]Error:[/bold red] Unknown platform: {platform}")
                     raise typer.Exit(1)
-                
+
+            if gh_repo:
+                owner, repo = gh_repo.split("/") if "/" in gh_repo else (None, None)
+                if not owner or not repo:
+                    console.print("[bold red]Error:[/bold red] Invalid --gh-repo format. Use owner/repo")
+                    raise typer.Exit(1)
+
+            if not owner or not repo:
+                detected_platform, owner, repo = get_platform_remote(repo_dir)
+
+            if not owner or not repo:
+                console.print("[bold red]Error:[/bold red] Cannot determine repository. Use --gh-repo flag or run in a git repo with remote origin.")
+                raise typer.Exit(1)
+
+            if detected_platform is None:
+                detected_platform = PlatformType.GITHUB  # Default
+
+            client = get_platform_client(detected_platform, token=global_options.api_key)
+            try:
                 issue_num = int(issue_ref) if issue_ref.isdigit() else None
                 if not issue_num:
-                    parsed_owner, parsed_repo, parsed_num = client.parse_issue_ref(issue_ref)
+                    parsed_platform, parsed_owner, parsed_repo, parsed_num = client.parse_issue_ref(issue_ref)
                     owner, repo = parsed_owner, parsed_repo
                     issue = client.get_issue(parsed_owner, parsed_repo, parsed_num)
                     issue_comments = client.get_issue_comments(
@@ -506,18 +568,22 @@ def analyze(
             update_cached_issue_difficulty,
         )
         cache_dir = get_cache_dir(repo_dir)
-        
+
         issue_num = None
         if not Path(issue_ref).exists() and issue_ref.isdigit():
             issue_num = int(issue_ref)
-        elif "github.com" in issue_ref:
+        elif not Path(issue_ref).exists():
+            # Try to extract issue number from URL for any platform
             try:
-                client_temp = GitHubClient(token=global_options.api_key)
-                try:
-                    parsed = client_temp.parse_issue_ref(issue_ref)
-                    issue_num = parsed[2]
-                finally:
-                    client_temp.close()
+                from src.platforms.base import detect_platform_from_url
+                url_platform = detect_platform_from_url(issue_ref)
+                if url_platform:
+                    client_temp = get_platform_client(url_platform, token=global_options.api_key)
+                    try:
+                        parsed = client_temp.parse_issue_ref(issue_ref)
+                        issue_num = parsed[3]  # (platform, owner, repo, number)
+                    finally:
+                        client_temp.close()
             except Exception:
                 pass
         
@@ -570,6 +636,7 @@ def analyze(
                 owner,
                 repo,
                 issue_num,
+                platform=detected_platform,
                 expected_signature=analysis_signature,
             )
             if cached_analysis:
@@ -594,6 +661,7 @@ def analyze(
                 save_analysis_cache(
                     repo_dir, owner, repo, issue_num,
                     _serialize_result(result),
+                    platform=detected_platform,
                     quick_score_original=result.overall_difficulty.raw_score,
                     analysis_signature=analysis_signature or "heuristic-v1",
                     scoring_method="ai" if configured_ai_scorer and use_ai else "heuristic",
@@ -692,13 +760,15 @@ def analyze(
 @app.command(name="list-issues")
 def list_issues(
     repo_path: Annotated[Optional[str], typer.Option("--repo", "-r", help="Path to repository (default: current dir)")] = None,
+    gh_repo: Annotated[Optional[str], typer.Option("--gh-repo", help="Repository (owner/repo) - auto-detected if not provided")] = None,
+    platform: Annotated[Optional[str], PlatformOption] = None,
     state: Annotated[str, typer.Option("--state", help="Issue state: open, closed, all")] = "open",
     sort_by: Annotated[str, typer.Option("--sort", help="Sort by: difficulty, number, created")] = "difficulty",
     filter_difficulty: Annotated[Optional[str], typer.Option("--filter-difficulty", help="Filter by difficulty: easy, medium, hard")] = None,
     filter_label: Annotated[Optional[str], typer.Option("--filter-label", help="Filter by label (partial match)")] = None,
     limit: Annotated[int, typer.Option("--limit", help="Max issues to show (0=all)")] = 0,
     cache_ttl: Annotated[int, typer.Option("--cache-ttl", help="Cache TTL in hours")] = 1,
-    no_cache: Annotated[bool, typer.Option("--no-cache", help="Force re-fetch from GitHub")] = False,
+    no_cache: Annotated[bool, typer.Option("--no-cache", help="Force re-fetch from platform")] = False,
     workers: Annotated[int, typer.Option("--workers", help="Parallel workers (0=auto)")] = 0,
     json_output: Annotated[bool, typer.Option("--json", help="Output in JSON format")] = False,
     interactive: Annotated[bool, typer.Option("--interactive", help="Select and analyze an issue")] = False,
@@ -706,41 +776,50 @@ def list_issues(
     """List and analyze issues in a repository (bulk scan with quick scoring)."""
     from pathlib import Path
     import hashlib
-    import subprocess
+
+    from src.platforms.base import get_platform_client, PlatformType
 
     repo_dir = Path(repo_path or ".").resolve()
 
-    def get_github_remote(repo_dir: Path) -> tuple[str, str]:
-        try:
-            result = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            url = result.stdout.strip()
-            if "github.com" in url:
-                if url.startswith("git@github.com:"):
-                    parts = url.replace("git@github.com:", "").replace(".git", "").split("/")
-                else:
-                    parts = url.replace("https://github.com/", "").replace(".git", "").split("/")
-                if len(parts) >= 2:
-                    return parts[0], parts[1]
-        except Exception:
-            pass
-        return None, None
+    # Determine platform and repo
+    detected_platform = None
+    owner, repo = None, None
 
-    owner, repo = get_github_remote(repo_dir)
+    if platform:
+        platform = platform.lower()
+        if platform == "github":
+            detected_platform = PlatformType.GITHUB
+        elif platform == "gitlab":
+            detected_platform = PlatformType.GITLAB
+        elif platform == "bitbucket":
+            detected_platform = PlatformType.BITBUCKET
+        else:
+            console.print(f"[bold red]Error:[/bold red] Unknown platform: {platform}")
+            raise typer.Exit(1)
+
+    if gh_repo:
+        parts = gh_repo.split("/") if "/" in gh_repo else []
+        if len(parts) == 2:
+            owner, repo = parts[0], parts[1]
+        else:
+            console.print("[bold red]Error:[/bold red] Invalid --gh-repo format. Use owner/repo")
+            raise typer.Exit(1)
+
     if not owner or not repo:
-        console.print("[bold red]Error:[/bold red] Cannot determine GitHub repo. Run in a git repo with remote origin.")
+        detected_platform, owner, repo = get_platform_remote(repo_dir)
+
+    if not owner or not repo:
+        console.print("[bold red]Error:[/bold red] Cannot determine repository. Run in a git repo with remote origin or use --gh-repo flag.")
         raise typer.Exit(1)
+
+    if detected_platform is None:
+        detected_platform = PlatformType.GITHUB  # Default
 
     cache_dir = None
     if not no_cache:
         from src.analyzer.cache import get_cache_dir, load_issue_cache, save_issue_cache
         cache_dir = get_cache_dir(repo_dir)
-        cached = load_issue_cache(repo_dir, owner, repo, state, cache_ttl)
+        cached = load_issue_cache(repo_dir, owner, repo, state, platform=detected_platform, ttl_hours=cache_ttl)
         if cached:
             issues_data = cached["issues"]
             if global_options.verbose:
@@ -751,13 +830,12 @@ def list_issues(
         cached = None
 
     if not cached:
-        from src.github.client import GitHubClient
         from src.indexer.storage import VectorStore
 
         if global_options.verbose:
             console.print(f"[cyan]Fetching issues from {owner}/{repo} (state: {state})...[/cyan]")
 
-        client = GitHubClient(token=global_options.api_key)
+        client = get_platform_client(detected_platform, token=global_options.api_key)
         try:
             db_path = str(repo_dir / ".oss-index" / "index.lance")
             vector_store = VectorStore(db_path)
@@ -773,7 +851,7 @@ def list_issues(
             issues_data = processor.process_issues(issues, limit=limit)
 
             if cache_dir:
-                save_issue_cache(repo_dir, owner, repo, state, issues_data, cache_ttl)
+                save_issue_cache(repo_dir, owner, repo, state, issues_data, platform=detected_platform, ttl_hours=cache_ttl)
         finally:
             client.close()
 
@@ -805,7 +883,8 @@ def list_issues(
             issue_num = int(selected)
             console.print(f"\n[bold]Analyzing issue #{issue_num}...[/bold]")
             # Run analyze logic for this issue
-            from src.github.client import GitHubClient
+            from src.platforms.base import get_platform_client
+            from src.github.client import load_issue_from_file
             from src.analyzer.preprocessor import IssuePreprocessor
             from src.analyzer.retriever import HybridRetriever
             from src.analyzer.scorer import HeuristicScorer
@@ -814,7 +893,7 @@ def list_issues(
             db_path = str(repo_dir / ".oss-index" / "index.lance")
             repo_id = hashlib.sha256(str(repo_dir).encode()).hexdigest()[:16]
 
-            client = GitHubClient(token=global_options.api_key)
+            client = get_platform_client(detected_platform, token=global_options.api_key)
             try:
                 issue = client.get_issue(owner, repo, issue_num)
                 comments = client.get_issue_comments(owner, repo, issue_num, issue_author=issue.user_login)
@@ -868,6 +947,7 @@ def list_issues(
                             repo_dir, owner, repo, issue_num,
                             result.overall_difficulty.difficulty,
                             result.overall_difficulty.raw_score,
+                            platform=detected_platform,
                         )
                         console.print("[green]Cached quick score updated![/green]")
 

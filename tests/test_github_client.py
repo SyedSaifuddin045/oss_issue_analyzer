@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch, MagicMock
 
 from src.github.client import GitHubClient, GitHubIssueComment, load_issue_from_file
+from src.platforms.base import PlatformType
 
 
 class GitHubClientTests(unittest.TestCase):
@@ -15,11 +16,11 @@ class GitHubClientTests(unittest.TestCase):
             (
                 "https://github.com/openai/openai-python/issues/123",
                 None,
-                ("openai", "openai-python", 123),
+                (PlatformType.GITHUB, "openai", "openai-python", 123),
             ),
-            ("openai/openai-python#456", None, ("openai", "openai-python", 456)),
-            ("openai/openai-python/789", None, ("openai", "openai-python", 789)),
-            ("42", "openai/openai-python", ("openai", "openai-python", 42)),
+            ("openai/openai-python#456", None, (PlatformType.GITHUB, "openai", "openai-python", 456)),
+            ("openai/openai-python/789", None, (PlatformType.GITHUB, "openai", "openai-python", 789)),
+            ("42", "openai/openai-python", (PlatformType.GITHUB, "openai", "openai-python", 42)),
         ]
 
         for ref, repo_hint, expected in cases:
