@@ -6,7 +6,7 @@ from rich.prompt import Prompt, Confirm
 from rich.table import Table
 from rich.panel import Panel
 
-__version__ = "1.0.0"
+__version__ = "1.0.2"
 
 app = typer.Typer(add_completion=False, invoke_without_command=True)
 console = Console()

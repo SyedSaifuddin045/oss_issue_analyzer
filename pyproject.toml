@@ -7,7 +7,7 @@ packages = ["src"]
 
 [project]
 name = "oss-issue-analyzer"
-version = "1.0.0"
+version = "1.0.2"
 description = "A CLI tool that helps first-time open source contributors analyze GitHub issues against local repositories."
 readme = "README.md"
 requires-python = ">=3.10"
