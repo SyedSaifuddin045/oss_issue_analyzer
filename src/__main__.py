@@ -6,14 +6,13 @@ from rich.prompt import Prompt, Confirm
 from rich.table import Table
 from rich.panel import Panel
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 app = typer.Typer(add_completion=False, invoke_without_command=True)
 console = Console()
 
 # Platform type for CLI
 PlatformOption = typer.Option(
-    None,
     "--platform",
     "-p",
     help="Platform: github, gitlab, bitbucket (auto-detected from git remote if not specified)",
@@ -1086,8 +1085,8 @@ def index(
 @app.command()
 def config(
     action: Annotated[str, typer.Argument(help="Action to perform (set, get, list)")],
-    key: Optional[str] = None,
-    value: Optional[str] = None,
+    key: Annotated[Optional[str], typer.Argument()] = None,
+    value: Annotated[Optional[str], typer.Argument()] = None,
 ):
     pass
 
